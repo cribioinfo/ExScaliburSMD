@@ -5,9 +5,9 @@
 
 __author__='Kyle Hernandez'
 __email__='khernandez@bsd.uchicago.edu'
-__version__='0.1.0'
+__version__='0.5.0'
 __license__='LGPLv3'
-__url__='https://bitbucket.org/kmhernan/bds-exscalibursmd'
+__url__='https://bitbucket.org/cribioinformatics/exscalibursmd'
 
 import argparse
 import datetime
@@ -19,7 +19,7 @@ import time
 from project.project import Project
 
 def build_project():
-    '''Builds the project directory, YAML files, and job files.'''
+    '''Builds the project directory, YAML files, and BDS submission files.'''
     # Check if the config file exists
     assert os.access(args.config_file, os.R_OK), \
                      logger.error("Could not find config file '{0}'. Please provide the correct path".format(
