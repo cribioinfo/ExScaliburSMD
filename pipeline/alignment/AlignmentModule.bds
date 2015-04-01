@@ -1,0 +1,49 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+include "utils.bds"
+include "BwaAln.bds"
+include "BwaMem.bds"
+include "Novoalign.bds"
+include "picard.bds"
+
+/** 
+ * Runs the alignment module including alignment, sorting, merging, deduping, and 
+ * metric collecting. 
+ *
+ * @input incfg the sample config map
+ * @input reference the reference fasta
+ * @input aln the alignment id
+ * @input opt the option map
+ * @returns nothing 
+ */
+void RunAlignments( string{} incfg, string reference, string aln, \
+                        string{} opt ) {
+  # Which aligner to run
+  if( aln == "bwa_aln") {
+    BwaAlnAndPostprocess( incfg, reference, opt )
+  }
+
+  if( aln == "bwa_mem") {
+    BwaMemAndPostprocess( incfg, reference, opt )
+  }
+
+  if( aln == "novoalign") {
+    NovoalignAndPostprocess( incfg, reference, opt )
+  }
+
+  # -- Safe Guard
+  wait
+}

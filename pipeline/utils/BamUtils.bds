@@ -1,0 +1,133 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+/** runSplitBams 
+ * splits bam files based on the interval file 
+ *
+ * @input incfg the sample config map
+ * @input bams the list of bamfile 
+ * @input opt the option map
+ * @return something...
+ */
+string[] runSplitBams( string{} incfg, string[] bams, string[] intervalBeds, string aln, string{} opt ) { 
+  # General information
+  string sample        = incfg{"sample"}
+  string normalID      = "$sample-NORMAL"
+  string tumorID       = "$sample-TUMOR"
+  int nSplits          = intervalBeds.size() 
+
+  # Files
+  string projectDir    = incfg{"projectDir"}.path()
+  string resultsDir    = incfg{"resultsDir"}.path()
+  string logsDir       = incfg{"logsDir"}.path()
+  string runDir        = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln/splitFiles/bam" 
+  string runLogsDir    = projectDir.path() + "/logs/02_GatkProcessing/$aln"
+
+  if( !runLogsDir.exists() ) runLogsDir.mkdir()
+  if( !runDir.exists() ) runDir.mkdir()
+
+  # Inputs
+  string normalBam = bams[0]
+  string tumorBam  = bams[1]
+
+  # Outputs
+  string[] normalSplits = loadSplitBamFiles( normalBam, runDir, nSplits )
+  string[] tumorSplits  = loadSplitBamFiles( tumorBam, runDir, nSplits )
+  string[] bothSplits   = normalSplits + tumorSplits
+
+  # Mark the split bams for removal after exiting
+  #bothSplits.rmOnExit()
+
+  # Run settings
+  string samtoolsExe = opt{"samtools_exe"}
+  string mods        = "# Splitting bam regions"
+  string[] modNames  = ["samtools_modname"]
+  mods               = getModuleString( modNames, mods )
+
+  # Run splitting 
+  string[] tids
+  if( bothSplits <- bams ) {
+    for( int i=0; i < nSplits; i++ ) {
+      string nb = normalSplits[i]
+      string tb = tumorSplits[i]
+      string itvl = intervalBeds[i]
+      string[] indeps
+      indeps.add(bams)
+      indeps.add(itvl)
+      tid := task( [nb, tb] <- indeps, cpus := 1, taskName := "split-bam.$sample.$aln.$i" ) {
+        sys $mods
+        sys $samtoolsExe view -b -L $itvl $normalBam > $nb && $samtoolsExe index $nb 
+        sys $samtoolsExe view -b -L $itvl $tumorBam > $tb && $samtoolsExe index $tb 
+        sys sleep $safeSleep
+      }
+      tids.add(tid)
+    }
+  }
+
+  # Return
+  return( tids )
+}
+
+string[] loadSplitBamFiles( string bam, string odir, int num ) {
+  # Prefix
+  string pfx = bam.baseName(".bam")
+  string[] lst
+
+  for( int c=0 ; c < num ; c++ ) {
+    lst.add("$odir/$pfx.callable.$c.bam")
+  }
+  return( lst )
+}
+
+void getIntervalBam( string inbam, string outbam, string bedFile, string logs, string{} opt ) {
+  # Samtools settings
+  string mod = '# Reducing to intervals in $bedFile'
+  mod        = getModuleString( ["samtools_modname"], mod )
+  string samExe = opt{'samtools_exe'}
+
+  # Run
+  task( outbam <- [inbam, bedFile], cpus := 1 ) {
+    sys $mod
+    sys $samExe view -b -L $bedFile $inbam > $outbam 2>> $logs
+    sys $samExe index $outbam 2>> $logs
+    sys sleep $safeSleep
+  }
+}
+
+#string[] runSplitRegions( string bed, string aln, string{} cfg, string{} opt ) {
+#  # General Info
+#  string sample = cfg{"sample"}
+#  string resultsDir = cfg{"resultsDir"}.path()
+#  string logsDir = cfg{"logsDir"}.path() + "/02_GatkProcessing/$aln/split"
+#  string runDir  = resultsDir.path() + "/02_GatkProcessing/$aln/split"
+#  if( !logsDir.exists() ) logsDir.mkdir()
+#  if( !runDir.exists() ) runDir.mkdir()
+#
+#  # Files
+#  string runLogs = "$logsDir/$sample.$aln.split.logs"
+#  string resCfg  = "$runDir/$sample.$aln.split.cfg" 
+#
+#  # Run info
+#  string splitExe = cfg{"split_script_exe"}
+#  string maxSplits = cfg{"max_splits"}.parseInt() 
+#
+#  # Run
+#  task( resCfg <- bed, cpus := 1 ) {
+#    sys $splitExe $bed $refCfg $maxSplits
+#  }
+#  
+#
+#}

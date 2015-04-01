@@ -1,0 +1,336 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+include "../utils/VcfUtils.bds"
+
+/**
+ * Runs MuTect and somatic filtration 
+ * @input incfg the sample config map
+ * @input reference the reference fasta
+ * @input opt the option map
+ * @input aln the alignment ID
+ * @returns nothing 
+ */
+void MutectAndFilter( string{} incfg, string[] callableBeds, string reference, string{} opt, string aln ) {
+
+  # General information
+  string sample        = incfg{"sample"}
+  string normalID      = "$sample-NORMAL"
+  string tumorID       = "$sample-TUMOR"
+  bool isSplit         = incfg{"split"}.parseBool()
+
+  # Files
+  string projectDir    = incfg{"projectDir"}.path()
+  string resultsDir    = incfg{"resultsDir"}.path()
+  string logsDir       = incfg{"logsDir"}.path()
+
+  string finalDir      = projectDir.path() + "/results/$sample/03_SomaticMutations"
+  string smdDir        = projectDir.path() + "/results/$sample/03_SomaticMutations/mutect"
+  string smdLogsDir    = projectDir.path() + "/logs/03_SomaticMutations/mutect"
+
+  if( !smdLogsDir.exists() ) smdLogsDir.mkdir()
+  if( !smdDir.exists() ) smdDir.mkdir()
+ 
+  # Get the input files
+  string bamDir = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln"
+  string nBam   = bamDir + "/$normalID.$aln.recalibrated.bam"
+  string tBam   = bamDir + "/$tumorID.$aln.recalibrated.bam"
+  string finalVcf = finalDir + "/$sample.mutect.$aln.final.vcf"
+
+  if( finalVcf <- [nBam, tBam] ) {
+    info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=mutect | Run=true")
+    #----- SPLIT JOBS -----# 
+    if( isSplit ) {
+      string tmpDir       = bamDir + "/splitFiles/bam"
+      int nSplits         = callableBeds.size()
+      string[] normalBams = loadSplitBamFiles( nBam, tmpDir, nSplits )
+      string[] tumorBams  = loadSplitBamFiles( tBam, tmpDir, nSplits )
+      string[] allBams
+      allBams.add(normalBams)
+      allBams.add(tumorBams)
+
+      # Check deps
+      if( finalVcf <- allBams ) { 
+        runMutect( normalBams, tumorBams, callableBeds, smdDir, smdLogsDir, normalID, \
+                   tumorID, sample, aln, opt, finalVcf, isSplit )
+      }
+    }
+
+    #----- NOT SPLIT JOBS -----# 
+    else {
+      # Check deps
+        runMutect( [nBam], [tBam], callableBeds, smdDir, smdLogsDir, normalID, tumorID, \
+                   sample, aln, opt, finalVcf, isSplit ) 
+    } 
+  } else info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=mutect | Run=false")
+}
+
+/**
+ * Run mutect, filter and formatting 
+ * @input normalBams input split/unsplit normal bam files
+ * @input tumorBams input split/unsplit tumor bam files
+ * @input invervals list of intervals
+ * @input odir output directory
+ * @input ldir logs directory
+ * @input normalID the normal sample ID
+ * @input tumorID the tumor sample ID
+ * @input sample the sample ID
+ * @input aln the alignment ID
+ * @input opt the options map
+ * @input finalVcf the final VCF file
+ * @returns nothing 
+ */ 
+void runMutect( string[] normalBams, string[] tumorBams, string[] intervals, \
+                string odir, string ldir, string normalID, string tumorID, \
+                string sample, string aln, string{} opt, string finalVcf, bool isSplit ) {
+
+  # Module options 
+  string[] modNames = ["java_modname", "mutect_modname"]
+  string mod        = "# Running MuTect"
+  mod               = getModuleString( modNames, mod )
+
+  # Run options 
+  string mutectExe = opt{"mutect_exe"}
+  string javaMem   = opt{"mutect_mem"}
+  string pythonExe = opt{"python_exe"}
+  int runMem       = ( opt{"mutect_mem"}.parseInt() + 1 ) * G
+  string java      = "$baseJava -Xmx" + javaMem + "G -jar" 
+  string fltExe    = opt{"somatic_filter_exe"}
+
+  # Mutect options
+  string reference = opt{"reference"}
+  string dbsnp     = opt{"knowndb"}
+  string rods      = "--disable_auto_index_creation_and_locking_when_reading_rods"
+  int minMapQ      = opt{"min_map_q"}.parseInt()
+  string tumorLod, normalLod, onlyPass, extended, cosmic
+  if( opt.hasKey("cosmic") ) cosmic = " --cosmic " + opt{"cosmic"}
+  if( opt{"mutect_extended_output"}.parseBool() ) extended = " --enable_extended_output"
+  if( opt{"mutect_only_passing_calls"}.parseBool() ) onlyPass = " --only_passing_calls"
+  if( opt.hasKey("mutect_tumor_lod") ) tumorLod = " --tumor_lod " + opt{"mutect_tumor_lod"}
+  if( opt.hasKey("mutect_nomal_lod") ) normalLod = " --nomal_lod " + opt{"mutect_nomal_lod"}
+
+  # Filter options
+  string fltMinNormalDepth, fltMinTumorDepth, fltMaxAltFreqNormal, fltMinAltFreqTumor, fltMinBaseQ
+  if( opt.hasKey("filter_min_normal_depth") ) fltMinNormalDepth = " --min-normal-depth " + \
+                                                                  opt{"filter_min_normal_depth"}
+  if( opt.hasKey("filter_min_tumor_depth") ) fltMinTumorDepth = " --min-tumor-depth " + opt{"filter_min_tumor_depth"}
+  if( opt.hasKey("filter_max_alt_freq_normal") ) fltMaxAltFreqNormal = " --max-alt-freq-normal " + \
+                                                                       opt{"filter_max_alt_freq_normal"}
+  if( opt.hasKey("filter_min_alt_freq_tumor") ) fltMinAltFreqTumor = " --min-alt-freq-tumor " + \
+                                                                     opt{"filter_min_alt_freq_tumor"}
+  if( opt.hasKey("filter_min_base_quality") ) fltMinBaseQ = " --min-base-quality " + opt{"filter_min_base_quality"}
+
+  # Task list
+  string[] fltVcfs
+  string[] tasks
+
+  # Output path 
+  string opath = odir + "/$aln"
+  if( !opath.exists() ) opath.mkdir() 
+
+  # ---- SPLIT ---- # 
+  if( isSplit ) {
+    # Loop over each interval and run 
+    for( int i=0; i<intervals.size(); i++ ) { 
+      # Inputs
+      string nbam = normalBams[i]
+      string tbam = tumorBams[i]
+      string interval = intervals[i]
+
+      # Outputs
+      string rawVcf   = opath + "/$sample.$aln.mutect.$i.vcf"
+      string fltVcf   = opath + "/$sample.$aln.mutect.$i.flt.vcf"
+      string covFile  = opath + "/$sample.$aln.mutect.$i.cov.wig"
+      string statFile = opath + "/$sample.$aln.mutect.$i.stats"
+      string olog     = ldir.path() + "/$sample.$aln.mutect.$i.logs"
+      fltVcfs.add(fltVcf)
+
+      # Run
+      if( rawVcf <- [nbam, tbam] ) {
+        tid := task( rawVcf <- [nbam, tbam], cpus := 1, mem := runMem, taskName := "mutect.$sample.$aln.$i" ) {
+          sys $mod
+          sys $java $mutectExe -T MuTect -R $reference$extended$cosmic$onlyPass$tumorLod$normalLod \
+              -dbsnp $dbsnp --min_qscore $minMapQ --input_file:normal $nbam \
+              --input_file:tumor $tbam $rods --tumor_sample_name $tumorID \
+              --normal_sample_name $normalID -S LENIENT --out $statFile \
+              --coverage_file $covFile -vcf $rawVcf -L $interval > $olog 2>&1 
+          sys sleep $safeSleep
+        }
+      }
+
+      if( fltVcf <- rawVcf ) {
+        tid := task( fltVcf <- rawVcf, cpus := 1, mem := runMem, taskName := "mutect-filter.$sample.$aln.$i" ) {
+          sys $pythonExe $fltExe \
+              mutect$fltMinNormalDepth$fltMinTumorDepth$fltMaxAltFreqNormal$fltMinAltFreqTumor \
+              $fltMinBaseQ --tumor-name $tumorID --normal-name $normalID $rawVcf $fltVcf >> $olog 2>&1
+          sys sleep $safeSleep
+        }
+        tasks.add(tid)
+      }
+    }
+    if( system == "local" ) wait tasks 
+
+    # Run merging
+    mergeVcfs( fltVcfs, finalVcf, ldir, sample, aln, "mutect", opt )
+  }
+
+  # -- Not Split --#
+  else {
+    # Format VCF
+    string[] vmodNames = ["java_modname", "picard_modname"]
+    string vmod        = "# Running format VCF"
+    vmod               = getModuleString( vmodNames, vmod )
+    string picardExe   = opt{"picard_exe"}
+    string vcfJavaMem  = opt{"picard_vcf_mem"}
+    string vcfMem      = (opt{"picard_vcf_mem"}.parseInt() + 1) * G
+    string vcfJava     = "$baseJava -Xmx" + vcfJavaMem + "G -jar" 
+
+    # Inputs
+    string nbam     = normalBams[0]
+    string tbam     = tumorBams[0]
+    string interval = intervals[0]
+ 
+    # Outputs 
+    string rawVcf   = opath + "/$sample.$aln.mutect.vcf"
+    string fltVcf   = opath + "/$sample.$aln.mutect.flt.vcf"
+    string covFile  = opath + "/$sample.$aln.mutect.cov.wig"
+    string statFile = opath + "/$sample.$aln.mutect.stats"
+    string olog     = ldir.path() + "/$sample.$aln.mutect.logs"
+
+    # Run
+    dep( rawVcf <- [nbam, tbam], cpus := 1, mem := runMem, taskName := "mutect.$sample.$aln" ) {
+      sys $mod
+      sys $java $mutectExe -T MuTect -R $reference$extended$cosmic$onlyPass$tumorLod$normalLod \
+          -dbsnp $dbsnp --min_qscore $minMapQ --input_file:normal $nbam \
+          --input_file:tumor $tbam $rods --tumor_sample_name $tumorID \
+          --normal_sample_name $normalID -S LENIENT --out $statFile \
+          --coverage_file $covFile -vcf $rawVcf -L $interval > $olog 2>&1 
+      sys sleep $safeSleep
+    }
+
+    dep( fltVcf <- rawVcf, cpus := 1, mem := runMem, taskName := "mutect-filter.$sample.$aln" ) {
+      sys $pythonExe $fltExe mutect$fltMinNormalDepth$fltMinTumorDepth$fltMaxAltFreqNormal$fltMinAltFreqTumor \
+          $fltMinBaseQ --tumor-name $tumorID --normal-name $normalID $rawVcf $fltVcf >> $olog 2>&1
+      sys sleep $safeSleep
+    }
+
+    dep( finalVcf <- fltVcf, cpus := 1, mem := vcfMem, taskName := "mutect-format.$sample.$aln" ) {
+      sys $vmod
+      sys $vcfJava $picardExe/VcfFormatConverter.jar INPUT=$fltVcf OUTPUT=$finalVcf \
+          REQUIRE_INDEX=false >> $olog 2>&1
+      sys sleep $safeSleep
+    }
+
+    goal( finalVcf )
+  }
+}
+
+/**
+ * Run mutect, filter and indexing for non-split jobs
+ * @input nbam input normal bam file
+ * @input tbam input tumor bam file
+ * @input interval the interval bed file
+ * @input odir output directory
+ * @input ldir logs directory
+ * @input normalID the normal sample ID
+ * @input tumorID the tumor sample ID
+ * @input sample the sample ID
+ * @input aln the alignment ID
+ * @input opt the options map
+ * @input finalVcf the final VCF file
+ * @returns nothing 
+void runMutect( string nbam, string tbam, string interval, string odir, string ldir, \
+                  string normalID, string tumorID, string sample, string aln, \
+                  string{} opt, string finalVcf ) {
+  # Mod options 
+  string[] modNames = ["java_modname", "mutect_modname"] 
+  string mmod       = "# Running MuTect"
+  mmod              = getModuleString( modNames, mmod )
+
+  # Run options
+  string mutectExe = opt{"mutect_exe"}
+  string javaMem   = opt{"mutect_mem"}
+  string pythonExe = opt{"python_exe"}
+  string fltExe    = opt{"somatic_filter_exe"}
+  int runMem       = ( opt{"mutect_mem"}.parseInt() + 1 ) * G
+  string java      = "$baseJava -Xmx" + javaMem + "G -jar" 
+
+  # Format VCF
+  string[] vmodNames = ["java_modname", "picard_modname"]
+  string vmod        = "# Running format VCF"
+  vmod               = getModuleString( vmodNames, vmod )
+  string picardExe   = opt{"picard_exe"}
+  string vcfJavaMem  = opt{"picard_vcf_mem"}
+  string vcfMem      = (opt{"picard_vcf_mem"}.parseInt() + 1) * G
+  string vcfJava     = "$baseJava -Xmx" + vcfJavaMem + "G -jar" 
+
+  # Mutect options
+  string reference = opt{"reference"}
+  string dbsnp     = opt{"knowndb"}
+  string rods      = "--disable_auto_index_creation_and_locking_when_reading_rods"
+  int minMapQ      = opt{"min_map_q"}.parseInt()
+  string tumorLod, normalLod, onlyPass, extended, cosmic
+  if( opt.hasKey("cosmic") ) cosmic = " --cosmic " + opt{"cosmic"}
+  if( opt{"mutect_extended_output"}.parseBool() ) extended = " --enable_extended_output"
+  if( opt{"mutect_only_passing_calls"}.parseBool() ) onlyPass = " --only_passing_calls"
+  if( opt.hasKey("mutect_tumor_lod") ) tumorLod = " --tumor_lod " + opt{"mutect_tumor_lod"}
+  if( opt.hasKey("mutect_nomal_lod") ) normalLod = " --normal_lod " + opt{"mutect_normal_lod"}
+
+  # Filter options
+  string fltMinNormalDepth, fltMinTumorDepth, fltMaxAltFreqNormal, fltMinAltFreqTumor, fltMinBaseQ
+  if( opt.hasKey("filter_min_normal_depth") ) fltMinNormalDepth = " --min-normal-depth " + \
+                                                                  opt{"filter_min_normal_depth"}
+  if( opt.hasKey("filter_min_tumor_depth") ) fltMinTumorDepth = " --min-tumor-depth " + opt{"filter_min_tumor_depth"}
+  if( opt.hasKey("filter_max_alt_freq_normal") ) fltMaxAltFreqNormal = " --max-alt-freq-normal " + \
+                                                                       opt{"filter_max_alt_freq_normal"}
+  if( opt.hasKey("filter_min_alt_freq_tumor") ) fltMinAltFreqTumor = " --min-alt-freq-tumor " + \
+                                                                     opt{"filter_min_alt_freq_tumor"}
+  if( opt.hasKey("filter_min_base_quality") ) fltMinBaseQ = " --min-base-quality " + opt{"filter_min_base_quality"}
+
+  # Outputs 
+  string opath    = odir + "/$aln"
+  string rawVcf   = opath + "/$sample.$aln.mutect.vcf"
+  string fltVcf   = opath + "/$sample.$aln.mutect.flt.vcf"
+  string covFile  = opath + "/$sample.$aln.mutect.cov.wig"
+  string statFile = opath + "/$sample.$aln.mutect.stats"
+  string olog     = ldir.path() + "/$sample.$aln.mutect.logs"
+  if( !opath.exists() ) opath.mkdir() 
+
+  # Run
+  dep( rawVcf <- [nbam, tbam], cpus := 1, mem := runMem ) {
+    sys $mmod
+    sys $java $mutectExe -T MuTect -R $reference$extended$cosmic$onlyPass$tumorLod$normalLod \
+        -dbsnp $dbsnp --min_qscore $minMapQ --input_file:normal $nbam \
+        --input_file:tumor $tbam $rods --tumor_sample_name $tumorID \
+        --normal_sample_name $normalID -S LENIENT --out $statFile \
+        --coverage_file $covFile -vcf $rawVcf -L $interval > $olog 2>&1 
+    sys sleep $safeSleep
+  }
+
+  dep( fltVcf <- rawVcf, cpus := 1, mem := runMem ) {
+    sys $pythonExe $fltExe mutect$fltMinNormalDepth$fltMinTumorDepth$fltMaxAltFreqNormal$fltMinAltFreqTumor \
+        $fltMinBaseQ --tumor-name $tumorID --normal-name $normalID $rawVcf $fltVcf >> $olog 2>&1
+    sys sleep $safeSleep
+  }
+
+  dep( finalVcf <- fltVcf, cpus := 1, mem := vcfMem ) {
+    sys $vmod
+    sys $vcfJava $picardExe/VcfFormatConverter.jar INPUT=$fltVcf OUTPUT=$finalVcf \
+        REQUIRE_INDEX=false >> $olog 2>&1
+    sys sleep $safeSleep
+  }
+
+  goal( finalVcf )
+}*/

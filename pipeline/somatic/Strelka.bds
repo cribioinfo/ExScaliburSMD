@@ -1,0 +1,119 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+include "../utils/BamUtils.bds"
+
+/** 
+ * Runs Strelka and somatic filtration
+ * @input incfg the sample config map
+ * @input reference the reference fasta
+ * @input opt the option map
+ * @input aln the alignment ID
+ * @returns nothing 
+ */
+void StrelkaAndFilter( string{} incfg, string reference, string{} opt, string aln ) { 
+  # General information
+  string sample        = incfg{"sample"}
+  string normalID      = "$sample-NORMAL"
+  string tumorID       = "$sample-TUMOR"
+  bool isSplit         = incfg{"split"}.parseBool()
+
+  # Files
+  string projectDir    = incfg{"projectDir"}.path()
+  string resultsDir    = incfg{"resultsDir"}.path()
+  string logsDir       = incfg{"logsDir"}.path()
+
+  string finalDir      = projectDir.path() + "/results/$sample/03_SomaticMutations"
+  string smdDir        = projectDir.path() + "/results/$sample/03_SomaticMutations/strelka"
+  string smdLogsDir    = projectDir.path() + "/logs/03_SomaticMutations/strelka"
+
+  if( !smdLogsDir.exists() ) smdLogsDir.mkdir()
+  if( !smdDir.exists() ) smdDir.mkdir()
+  
+  # Get the input/output files
+  string bamDir = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln"
+  string nBam   = bamDir + "/$normalID.$aln.recalibrated.bam"
+  string tBam   = bamDir + "/$tumorID.$aln.recalibrated.bam"
+  string strelkaConfig = incfg{"strelka_config"} 
+  string runDir        = "$smdDir/$aln"
+  string allIndels     = "$runDir/results/all.somatic.indels.vcf"
+  string allSnvs       = "$runDir/results/all.somatic.snvs.vcf"
+  string fltVcf        = "$runDir/results/all.somatic.flt.vcf"
+  string finalVcf      = finalDir + "/$sample.strelka.$aln.final.vcf"
+  string cfgLog        = smdLogsDir + "/$sample.strelka.$aln.config.logs" 
+  string runLogs       = smdLogsDir + "/$sample.strelka.$aln.run.logs" 
+  string fmtLogs       = smdLogsDir + "/$sample.strelka.$aln.fmt.logs" 
+
+  # Run options 
+  string[] modNames  = ["strelka_modname"]
+  string mod         = "# Running Strelka"
+  mod                = getModuleString( modNames, mod )
+  int threads        = opt{"strelka_threads"}.parseInt()
+  string strelkaExe  = opt{"strelka_exe"}
+  int runMem         = opt{"strelka_mem"}.parseInt() * G
+  runMem             = getMemorySize( runMem, threads )
+  string pythonExe   = opt{"python_exe"}
+  string fltExe      = opt{"somatic_filter_exe"}
+
+  # Filter options
+  string fltMinNormalDepth, fltMinTumorDepth
+  if( opt.hasKey("filter_min_normal_depth") ) fltMinNormalDepth = " --min-normal-depth " + \
+                                                                  opt{"filter_min_normal_depth"}
+  if( opt.hasKey("filter_min_tumor_depth") ) fltMinTumorDepth = " --min-tumor-depth " + \
+                                                                  opt{"filter_min_tumor_depth"}
+
+  # Format VCF
+  string[] vmodList = ["java_modname", "picard_modname"]
+  string vmod       = "# Running format VCF"
+  vmod              = getModuleString( vmodList, vmod )
+  string picardExe  = opt{"picard_exe"}
+  string vcfJavaMem = opt{"picard_vcf_mem"}
+  int vcfMem        = (opt{"picard_vcf_mem"}.parseInt() + 1 ) * G
+  string vcfJava    = "$baseJava -Xmx" + vcfJavaMem + "G -jar"
+
+  # Run
+  string tid, ftid
+  if( finalVcf <- [nBam, tBam] ) {
+    info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=strelka | Run=true")
+    if( runDir.exists() ) {
+      sys rm -rf $runDir
+    }
+
+    dep( [allIndels, allSnvs] <- [nBam, tBam], cpus := threads, mem := runMem, \
+         taskName := "strelka.$sample.$aln" ) {
+      sys $mod
+      sys $strelkaExe --normal=$nBam --tumor=$tBam --ref=$reference --config=$strelkaConfig \
+          --output-dir=$runDir > $cfgLog 2>&1
+      sys make -C $runDir -j $threads > $runLogs 2>&1
+      sys sleep $safeSleep
+    } 
+
+    dep( fltVcf <- [allIndels, allSnvs], cpus := 1, mem := runMem, taskName := "strelka-filter.$sample.$aln" ) {
+      sys $pythonExe $fltExe strelka$fltMinNormalDepth$fltMinTumorDepth --tumor-name $tumorID \
+          --normal-name $normalID $allSnvs $allIndels $fltVcf >> $runLogs 2>&1
+      sys sleep $safeSleep
+    } 
+
+    # Format VCF
+    dep( finalVcf <- fltVcf, cpus := 1, mem = runMem, taskName := "strelka-format.$sample.$aln" ) {
+      sys $vmod
+      sys $vcfJava $picardExe/VcfFormatConverter.jar INPUT=$fltVcf OUTPUT=$finalVcf \
+          REQUIRE_INDEX=false > $fmtLogs 2>&1
+      sys sleep $safeSleep
+    } 
+
+    goal( finalVcf )
+  } else info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=strelka | Run=false")
+}

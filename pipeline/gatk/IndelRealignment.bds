@@ -1,0 +1,171 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+string rods = "--disable_auto_index_creation_and_locking_when_reading_rods"
+
+/**
+ * runs RealignerTargetCreator and IndelRealigner 
+ * @input incfg the sample config map
+ * @input opt the option map
+ * @input aln the alignment ID 
+ * @returns a list of realigned bams [normal, tumor] 
+ */
+string[] runIndelRealign( string{} incfg, string{} opt, string aln ) {
+  # General information
+  string reference     = opt{"reference"}
+  string knownIndel    = opt{"known_indel"}
+  string knownDb       = opt{"knowndb"}
+  string sample        = incfg{"sample"}
+  string normalID      = "$sample-NORMAL"
+  string tumorID       = "$sample-TUMOR"
+
+  # Files
+  string referenceName = opt{"reference_name"}
+  string projectDir    = incfg{"projectDir"}.path()
+  string resultsDir    = incfg{"resultsDir"}.path()
+  string logsDir       = incfg{"logsDir"}.path()
+  string alnDir        = projectDir.path() + "/results/$sample/01_Alignments/$aln"
+  string runDir        = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln"
+  string tmpDir        = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln/tmp"
+  string runLogsDir    = projectDir.path() + "/logs/02_GatkProcessing/$aln"
+
+  if( !runLogsDir.exists() ) runLogsDir.mkdir()
+  if( !runDir.exists() ) runDir.mkdir()
+  if( !tmpDir.exists() ) tmpDir.mkdir()
+
+  #-- NORMAL 
+  string normalBam      = alnDir + "/$normalID.$aln.dedup.bam"
+  string normalTargets  = tmpDir + "/$normalID.$aln.targets.intervals"
+  string normalRealign  = tmpDir + "/$normalID.$aln.realigned.bam"
+  string normalTargetsLogs = runLogsDir + "/$normalID.$aln.targets.logs"
+  string normalRealignLogs = runLogsDir + "/$normalID.$aln.realignment.logs"
+
+  # Deps
+  if( normalRealign <- normalBam ) { 
+    info("Sample=$sample | Phenotype=NORMAL | Task=GATK Processing-IndelRealignment | Run=true")
+    # Get targets
+    string targetTid = runTargetCreator( normalBam, normalTargetsLogs, normalTargets, knownIndel, \
+                                         reference, normalID, aln, opt ) 
+
+    # Get realigned bam
+    string realignTid = runRealignment( normalBam, normalRealign, normalRealignLogs, normalTargets, \
+                                        knownIndel, reference, normalID, aln, opt ) 
+
+  } else info("Sample=$sample | Phenotype=NORMAL | Task=GATK Processing-IndelRealignment | Run=false")
+
+  #-- TUMOR 
+  string tumorBam      = alnDir + "/$tumorID.$aln.dedup.bam"
+  string tumorLogs     = runLogsDir + "/$tumorID.$aln.dedup.logs"
+  string tumorTargets  = tmpDir + "/$tumorID.$aln.targets.intervals"
+  string tumorRealign  = tmpDir + "/$tumorID.$aln.realigned.bam"
+  string tumorTargetsLogs = runLogsDir + "/$tumorID.$aln.targets.logs"
+  string tumorRealignLogs = runLogsDir + "/$tumorID.$aln.realignment.logs"
+  
+  if( tumorRealign <- tumorBam ) { 
+    info("Sample=$sample | Phenotype=TUMOR | Task=GATK Processing-IndelRealignment | Run=true")
+    # Get targets
+    string targetTid = runTargetCreator( tumorBam, tumorTargetsLogs, tumorTargets, knownIndel, \
+                                         reference, tumorID, aln, opt ) 
+
+    # Get realigned bam
+    string realignTid = runRealignment( tumorBam, tumorRealign, tumorRealignLogs, tumorTargets, \
+                                        knownIndel, reference, tumorID, aln, opt ) 
+  } else info("Sample=$sample | Phenotype=TUMOR | Task=GATK Processing-IndelRealignment | Run=false")
+
+  return [normalRealign, tumorRealign]
+}
+
+/**
+ * runs RealignerTargetCreator
+ * @input bam the input bam file 
+ * @input logs the log file
+ * @input targets the output targets interval file
+ * @input known the known InDels VCF
+ * @input reference the reference fasta
+ * @input opt the option map
+ * @returns a task ID 
+ */
+string runTargetCreator( string bam, string logs, string targets, string known, \
+                         string reference, string sampID, string aln,string{} opt ) {
+  # Options
+  string knownString
+  string targetBed
+  if( !known.isEmpty() ) knownString = " --known $known"
+  if( opt.hasKey("target_bed") ) targetBed = " -L " + opt{"target_bed"}
+
+  # Run settings
+  int threads        = opt{"gatk_threads"}.parseInt()
+  string gatkExe     = opt{"gatk_exe"}
+  string gatkJavaMem = opt{"gatk_mem"}
+  int gatkMem        = (opt{"gatk_mem"}.parseInt() + 1) * G
+  gatkMem            = getMemorySize( gatkMem, threads )
+  string java        = "$baseJava -Xmx" + gatkJavaMem + "G -jar" 
+  string mod         = "# RealignerTargetCreator on $bam"
+  string[] modNames  = ["java_modname", "gatk_modname"]
+  mod                = getModuleString( modNames, mod ) 
+
+  # Run
+  string tid
+  if( targets <- bam ) {
+    tid = task( targets <- bam, cpus := threads, mem := gatkMem, taskName := "targets.$sampID.$aln" ) {
+      sys $mod
+      sys $java $gatkExe -T RealignerTargetCreator -I $bam \
+          -R $reference$knownString$targetBed $rods -nt $threads -o $targets > $logs 2>&1 
+      sys sleep $safeSleep
+    } 
+  }
+
+  return( tid )
+}
+
+/**
+ * runs IndelRealigner 
+ * @input bam the input bam file 
+ * @input raBam the output realigned bam file 
+ * @input logs the log file
+ * @input targets the output targets interval file
+ * @input known the known InDels VCF
+ * @input reference the reference fasta
+ * @input opt the option map
+ * @returns a task ID 
+ */
+string runRealignment( string bam, string raBam, string logs, string targets, \
+                       string known, string reference, string sampID, string aln, string{} opt ) {
+  # Options
+  string knownString
+  if( !known.isEmpty() ) knownString = " --knownAlleles $known"
+
+  # Run settings
+  string gatkExe     = opt{"gatk_exe"}
+  string gatkJavaMem = opt{"gatk_mem"}
+  int gatkMem        = (opt{"gatk_mem"}.parseInt() + 1) * G
+  string java        = "$baseJava -Xmx" + gatkJavaMem + "G -jar " 
+  string mod         = "# IndelRealigner on $bam"
+  string[] modNames  = ["java_modname", "gatk_modname"]
+  mod                = getModuleString( modNames, mod )
+
+  # Run
+  string tid
+  if( raBam <- [targets, bam] ) {
+    tid = task( raBam <- [targets, bam], cpus := 1, mem := gatkMem, taskName := "realign.$sampID.$aln" ) {
+      sys $mod
+      sys $java $gatkExe -T IndelRealigner -I $bam -R $reference$knownString $rods \
+          -targetIntervals $targets -o $raBam > $logs 2>&1 
+      sys sleep $safeSleep
+    }
+  }
+  return( tid )
+}

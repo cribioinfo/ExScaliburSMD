@@ -1,0 +1,59 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+/** FastQC 
+ * runs FastQC 
+ *
+ * @input logsDir the log directory 
+ * @input outDir the output directory 
+ * @input fq1 the R1 fastq 
+ * @input fq2 the R2 fastq 
+ * @input out1 the R1 output fastqc data file 
+ * @input out2 the R2 output fastqc data file 
+ * @input rg the readgroup id 
+ * @input paired is this a paired-end sample? 
+ * @input opt the option map
+ * @return Nothing 
+ */
+void FastQC( string logsDir, string outDir, string fq1, string fq2, string out1, string out2, \
+             string rg, bool paired, string{} opt ) {
+  # Setup files
+  string logs = "$logsDir/$rg.fastqc.logs"
+  
+  # Run parameters
+  string[] modNames = ["fastqc_modname"] 
+  string mod        = "# Running FastQC on $rg"
+  mod               = getModuleString( modNames, mod )
+  int threads       = opt{"fastqc_threads"}.parseInt()
+  int jobMem        = opt{"fastqc_mem"}.parseInt() * G
+  jobMem            = getMemorySize( jobMem, threads )
+  string exe        = opt{"fastqc_exe"}
+
+  # Paired
+  task( paired, [out1, out2] <- [fq1, fq2], cpus := threads, mem := jobMem, taskName := "fastqc.$rg" ) {
+    sys $mod
+    sys $exe -o $outDir -t $threads --nogroup $fq1 $fq2 --extract > $logs 2>&1
+    sys sleep $safeSleep
+  }
+
+  # Single
+  task( !paired, out1 <- fq1, cpus := threads, mem := jobMem, taskName := "fastqc.$rg" ) {
+    sys $mod
+    sys $exe -o $outDir -t $threads --nogroup $fq1 --extract > $logs 2>&1
+    sys sleep $safeSleep
+  }
+
+}

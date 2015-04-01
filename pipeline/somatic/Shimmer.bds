@@ -1,0 +1,351 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+include "../utils/BamUtils.bds"
+include "../utils/VcfUtils.bds"
+
+/** 
+ * Runs Shimmer and somatic filtration
+ * @input incfg the sample config map
+ * @input reference the reference fasta
+ * @input opt the option map
+ * @input aln the alignment ID
+ * @returns nothing 
+ */
+void ShimmerAndFilter( string{} incfg, string[] callableBeds, string reference, string{} opt, string aln ) {
+  # General information
+  string sample        = incfg{"sample"}
+  string normalID      = "$sample-NORMAL"
+  string tumorID       = "$sample-TUMOR"
+  bool isSplit         = incfg{"split"}.parseBool()
+
+  # Files
+  string projectDir    = incfg{"projectDir"}.path()
+  string resultsDir    = incfg{"resultsDir"}.path()
+  string logsDir       = incfg{"logsDir"}.path()
+
+  string finalDir      = projectDir.path() + "/results/$sample/03_SomaticMutations"
+  string smdDir        = projectDir.path() + "/results/$sample/03_SomaticMutations/shimmer"
+  string smdLogsDir    = projectDir.path() + "/logs/03_SomaticMutations/shimmer"
+
+  if( !smdLogsDir.exists() ) smdLogsDir.mkdir()
+  if( !smdDir.exists() ) smdDir.mkdir()
+
+  # Get the input files
+  string bamDir   = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln"
+  string nBam     = bamDir + "/$normalID.$aln.recalibrated.bam"
+  string tBam     = bamDir + "/$tumorID.$aln.recalibrated.bam"
+  string finalVcf = finalDir + "/$sample.shimmer.$aln.final.vcf"
+
+  # Run Split Jobs
+  if( finalVcf <- [nBam, tBam] ) { 
+    info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=shimmer | Run=true")
+    if( isSplit ) {
+      string tmpDir       = bamDir + "/splitFiles/bam"
+      int nSplits         = callableBeds.size()
+      string[] normalBams = loadSplitBamFiles( nBam, tmpDir, nSplits )
+      string[] tumorBams  = loadSplitBamFiles( tBam, tmpDir, nSplits )
+      string[] allBams
+      allBams.add(normalBams)
+      allBams.add(tumorBams)
+      allBams.add([nBam, tBam])
+
+      if( finalVcf <- allBams ) { 
+        runShimmer( normalBams, tumorBams, callableBeds, smdDir, smdLogsDir, normalID, \
+                    tumorID, sample, aln, opt, finalVcf, isSplit )
+      }
+    } else {
+      runShimmer( [nBam], [tBam], callableBeds, smdDir, smdLogsDir, normalID, \
+                  tumorID, sample, aln, opt, finalVcf, isSplit ) 
+    }
+  } else info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=shimmer | Run=false")
+}
+
+/**
+ * Runs shimmer, filtering and merging for split jobs
+ * @input normalBams list of input normal split bams
+ * @input tumorBams list of input tumor split bams
+ * @input intervals list of intervals
+ * @input odir output directory
+ * @input ldir log directory
+ * @input normalID the normal sample ID
+ * @input tumorID the tumor sample ID
+ * @input sample the sample ID
+ * @input aln the alignment ID
+ * @input opt the optiona map
+ * @input finalVcf the final VCF file
+ * @return nothing 
+ */
+void runShimmer( string[] normalBams, string[] tumorBams, string[] intervals, \
+                 string odir, string ldir, string normalID, string tumorID, \
+                 string sample, string aln, string{} opt, string finalVcf, bool isSplit ) {
+  # Run options 
+  string mod        = "# Running Shimmer"
+  string[] modNames = ["samtools_modname", "bedtools_modname", "shimmer_modname"]
+  mod               = getModuleString( modNames, mod )
+  string shimmerExe = opt{"shimmer_exe"}
+  int runMem        = opt{"shimmer_mem"}.parseInt()
+  string pythonExe  = opt{"python_exe"}
+  string fltExe     = opt{"somatic_filter_exe"}
+  string refDict    = opt{"reference_dict"}
+
+  # Shimmer options
+  string reference = opt{"reference"}
+  int minMapQ      = opt{"min_map_q"}.parseInt()
+  string minBQ, maxQ
+  if( opt.hasKey("shimmer_min_bq") ) minBQ = " --minqual " + opt{"shimmer_min_bq"} 
+  if( opt.hasKey("shimmer_max_q") ) maxQ = " --max_q " + opt{"max_qscore"}
+
+  # Filter options
+  string fltMinNormalDepth, fltMinTumorDepth, fltMaxAltFreqNormal, fltMinAltFreqTumor, fltMinQual
+  if( opt.hasKey("filter_min_normal_depth") ) fltMinNormalDepth = " --min-normal-depth " + \
+                                                                  opt{"filter_min_normal_depth"}
+  if( opt.hasKey("filter_min_tumor_depth") ) fltMinTumorDepth = " --min-tumor-depth " + opt{"filter_min_tumor_depth"}
+  if( opt.hasKey("filter_max_alt_freq_normal") ) fltMaxAltFreqNormal = " --max-alt-freq-normal " + \
+                                                                       opt{"filter_max_alt_freq_normal"}
+  if( opt.hasKey("filter_min_alt_freq_tumor") ) fltMinAltFreqTumor = " --min-alt-freq-tumor " + \
+                                                                     opt{"filter_min_alt_freq_tumor"}
+  if( opt.hasKey("filter_min_qual") ) fltMinQual = " --min-qual " + opt{"filter_min_qual"}
+
+  # Task list
+  string[] fltVcfs
+  string[] tasks
+
+  # Output 
+  string opath = odir + "/$aln"
+  if( !opath.exists() ) opath.mkdir() 
+
+  # ---- SPLIT ---- #
+  if( isSplit ) {
+    for( int i=0; i<intervals.size(); i++ ) { 
+      # Inputs
+      string nbam = normalBams[i]
+      string tbam = tumorBams[i]
+      string interval = intervals[i]
+
+      # Outputs
+      string iPath    = opath + "/$i"
+      string rawVcf   = iPath + "/somatic_diffs.vcf"
+      string rawVs    = iPath + "/somatic_diffs.vs"
+      string fltVcf   = opath + "/$sample.$aln.shimmer.$i.flt.vcf"
+      string clog     = ldir.path() + "/$sample.$aln.shimmer.$i.logs"
+      string flog     = ldir.path() + "/$sample.$aln.shimmer.$i.filter.logs"
+
+      # Run
+      if( rawVcf <- [nbam, tbam] ) {
+        string tid
+        tid = task(iPath.exists(), rawVcf <- [nbam, tbam], cpus := 1, mem := runMem, \
+                   taskName := "shimmer.$sample.$aln.$i" ) {
+          sys $mod
+          sys rm -rf $iPath
+          sys mkdir -p $iPath
+          sys $shimmerExe$minBQ$maxQ --mapqual $minMapQ --bedFile $interval --outdir $iPath \
+              $nbam $tbam --ref $reference > $clog 2>&1
+          sys sleep $safeSleep
+        }
+        tid = task(!iPath.exists(), rawVcf <- [nbam, tbam], cpus := 1, mem := runMem, \
+                   taskname := "shimmer.$sample.$aln.$i" ) {
+          sys $mod
+          sys mkdir -p $iPath
+          sys $shimmerExe$minBQ$maxQ --mapqual $minMapQ --bedFile $interval --outdir $iPath \
+              $nbam $tbam --ref $reference > $clog 2>&1
+          sys sleep $safeSleep
+        }
+        tasks.add(tid)
+      }
+
+      if( fltVcf <- rawVcf ) {
+        tid := task(fltVcf <- rawVcf, cpus := 1, mem := runMem, taskName := "shimmer-filter.$sample.$aln.$i" ) {
+          sys $pythonExe $fltExe \
+              shimmer$fltMinNormalDepth$fltMinTumorDepth$fltMaxAltFreqNormal$fltMinAltFreqTumor \
+              $fltMinQual --tumor-name $tumorID --normal-name $normalID --reference $reference \
+              $rawVcf $rawVs $fltVcf > $flog 2>&1
+          sys sleep $safeSleep
+        } 
+        tasks.add(tid)
+      }
+
+      fltVcfs.add(fltVcf)
+    }
+
+    if( system == "local" ) wait tasks
+
+    #fltVcfs.rmOnExit()
+
+    # Merge
+    string mergeid = mergeVcfs( fltVcfs, finalVcf, ldir, sample, aln, "shimmer", opt )
+  }
+
+  # ---- NOT SPLIT ----#
+  else {
+    # Format VCF
+    string[] vmodList = ["java_modname", "picard_modname"]
+    string vmod       = "# Running format VCF"
+    vmod              = getModuleString( vmodList, vmod )
+    string picardExe  = opt{"picard_exe"}
+    string vcfJavaMem = opt{"picard_vcf_mem"}
+    string vcfMem     = (opt{"picard_vcf_mem"}.parseInt() + 1) * G
+    string vcfJava    = "$baseJava -Xmx" + vcfJavaMem + "G -jar"
+
+    # Inputs
+    string nbam       = normalBams[0]
+    string tbam       = tumorBams[0]
+    string interval   = intervals[0]
+
+    # Outputs
+    string rawVcf     = opath + "/somatic_diffs.vcf"
+    string rawVs      = opath + "/somatic_diffs.vs"
+    string fltVcf     = opath + "/$sample.$aln.shimmer.flt.vcf"
+    string clog       = ldir.path() + "/$sample.$aln.shimmer.logs"
+    string flog       = ldir.path() + "/$sample.$aln.shimmer.filter.logs"
+
+    # Run Shimmer
+    if( rawVcf <- [nbam, tbam] ) {
+      task(opath.exists(), rawVcf <- [nbam, tbam], cpus := 1, mem := runMem, taskName := "shimmer.$sample.$aln" ) {
+        sys $mod
+        sys rm -rf $opath
+        sys mkdir -p $opath
+        sys $shimmerExe$minBQ$maxQ --mapqual $minMapQ --bedFile $intervals --outdir $opath \
+            $nbam $tbam --ref $reference > $clog 2>&1
+        sys sleep $safeSleep
+      }
+      task(!opath.exists(), rawVcf <- [nbam, tbam], cpus := 1, mem := runMem, taskName := "shimmer.$sample.$aln" ) {
+        sys $mod
+        sys mkdir -p $opath
+        sys $shimmerExe$minBQ$maxQ --mapqual $minMapQ --bedFile $intervals --outdir $opath \
+            $nbam $tbam --ref $reference > $clog 2>&1
+        sys sleep $safeSleep
+      }
+    }
+
+    # Run filter
+    if( fltVcf <- rawVcf ) {
+      task(fltVcf <- rawVcf, cpus := 1, mem := runMem, taskName := "shimmer-filter.$sample.$aln" ) {
+        sys $pythonExe $fltExe \
+            shimmer$fltMinNormalDepth$fltMinTumorDepth$fltMaxAltFreqNormal$fltMinAltFreqTumor \
+            $fltMinQual --tumor-name $tumorID --normal-name $normalID --reference $reference \
+            $rawVcf $rawVs $fltVcf > $flog 2>&1
+        sys sleep $safeSleep
+      }
+    }
+
+    # Run format
+    task( finalVcf <- fltVcf, cpus := 1, mem := vcfMem, taskName := "shimmer-format.$sample.$aln" ) {
+      sys $vmod
+      sys $vcfJava $picardExe/VcfFormatConverter.jar INPUT=$fltVcf OUTPUT=$finalVcf \
+          REQUIRE_INDEX=false >> $flog 2>&1
+      sys sleep $safeSleep
+    }
+  }
+
+}
+
+/**
+ * Runs shimmer, filtering and merging for non-split jobs
+ * @input normalBams list of input normal split bams
+ * @input tumorBams list of input tumor split bams
+ * @input intervals list of intervals
+ * @input odir output directory
+ * @input ldir log directory
+ * @input normalID the normal sample ID
+ * @input tumorID the tumor sample ID
+ * @input sample the sample ID
+ * @input aln the alignment ID
+ * @input opt the optiona map
+ * @input finalVcf the final VCF file
+ * @return nothing 
+void runShimmer( string nbam, string tbam, string intervals, \
+                 string odir, string ldir, string normalID, string tumorID, \
+                 string sample, string aln, string{} opt, string finalVcf ) {
+  # Run options 
+  string mod        = "# Running Shimmer"
+  string[] modList  = ["samtools_modname", "bedtools_modname", "shimmer_modname"]
+  mod               = getModuleString( modList, mod )
+  string shimmerExe = opt{"shimmer_exe"}
+  int runMem        = opt{"shimmer_mem"}.parseInt()
+  string pythonExe  = opt{"python_exe"}
+  string fltExe     = opt{"somatic_filter_exe"}
+
+  # Shimmer options
+  string reference = opt{"reference"}
+  int minMapQ      = opt{"min_map_q"}.parseInt()
+  string minBQ, maxQ
+  if( opt.hasKey("shimmer_min_bq") ) minBQ = " --minqual " + opt{"shimmer_min_bq"} 
+  if( opt.hasKey("shimmer_max_q") ) maxQ = " --max_q " + opt{"max_qscore"}
+
+  # Filter options
+  string fltMinNormalDepth, fltMinTumorDepth, fltMaxAltFreqNormal, fltMinAltFreqTumor, fltMinQual
+  if( opt.hasKey("filter_min_normal_depth") ) fltMinNormalDepth = " --min-normal-depth " + \
+                                                                  opt{"filter_min_normal_depth"}
+  if( opt.hasKey("filter_min_tumor_depth") ) fltMinTumorDepth = " --min-tumor-depth " + opt{"filter_min_tumor_depth"}
+  if( opt.hasKey("filter_max_alt_freq_normal") ) fltMaxAltFreqNormal = " --max-alt-freq-normal " + \
+                                                                       opt{"filter_max_alt_freq_normal"}
+  if( opt.hasKey("filter_min_alt_freq_tumor") ) fltMinAltFreqTumor = " --min-alt-freq-tumor " + \
+                                                                     opt{"filter_min_alt_freq_tumor"}
+  if( opt.hasKey("filter_min_qual") ) fltMinQual = " --min-qual " + opt{"filter_min_qual"}
+
+  # Format VCF
+  string[] vmodList = ["java_modname", "picard_modname"]
+  string vmod       = "# Running format VCF"
+  vmod              = getModuleString( vmodList, vmod )
+  string picardExe  = opt{"picard_exe"}
+  string vcfJavaMem = opt{"picard_vcf_mem"}
+  string vcfMem     = (opt{"picard_vcf_mem"}.parseInt() + 1) * G
+  string vcfJava    = "$baseJava -Xmx" + vcfJavaMem + "G -jar"
+
+  # Loop over each interval and run 
+  string opath = odir + "/$aln"
+
+  # Outputs
+  string rawVcf   = opath + "/somatic_diffs.vcf"
+  string rawVs    = opath + "/somatic_diffs.vs"
+  string fltVcf   = opath + "/$sample.$aln.shimmer.flt.vcf"
+  string clog     = ldir.path() + "/$sample.$aln.shimmer.logs"
+  string flog     = ldir.path() + "/$sample.$aln.shimmer.filter.logs"
+
+  # Run Shimmer
+  if( rawVcf <- [nbam, tbam] ) {
+    task(opath.exists(), rawVcf <- [nbam, tbam], cpus := 1, mem := runMem ) {
+      sys $mod
+      sys rm -rf $opath
+      sys mkdir -p $opath
+      sys $shimmerExe$minBQ$maxQ --mapqual $minMapQ --bedFile $intervals --outdir $opath \
+          $nbam $tbam --ref $reference > $clog 2>&1
+    }
+    task(!opath.exists(), rawVcf <- [nbam, tbam], cpus := 1, mem := runMem ) {
+      sys $mod
+      sys mkdir -p $opath
+      sys $shimmerExe$minBQ$maxQ --mapqual $minMapQ --bedFile $intervals --outdir $opath \
+          $nbam $tbam --ref $reference > $clog 2>&1
+    }
+  }
+
+  # Run filter
+  if( fltVcf <- rawVcf ) {
+    task(fltVcf <- rawVcf, cpus := 1, mem := runMem ) {
+      sys $pythonExe $fltExe \
+          shimmer$fltMinNormalDepth$fltMinTumorDepth$fltMaxAltFreqNormal$fltMinAltFreqTumor \
+          $fltMinQual --tumor-name $tumorID --normal-name $normalID --reference $reference \
+          $rawVcf $rawVs $fltVcf > $flog 2>&1
+    }
+  }
+
+  # Run format
+  task( finalVcf <- fltVcf, cpus := 1, mem := vcfMem ) {
+    sys $vmod
+    sys $vcfJava $picardExe/VcfFormatConverter.jar INPUT=$fltVcf OUTPUT=$finalVcf \
+        REQUIRE_INDEX=false >> $flog 2>&1
+  }
+}*/

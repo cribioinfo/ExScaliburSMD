@@ -1,0 +1,314 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+include "../utils/BamUtils.bds"
+include "../utils/VcfUtils.bds"
+
+/** 
+ * Runs SomaticSniper and somatic filtration
+ * @input incfg the sample config map
+ * @input reference the reference fasta
+ * @input opt the option map
+ * @input aln the alignment ID
+ * @returns the task ID
+ */
+void SomaticSniperAndFilter( string{} incfg, string[] callableBeds, string reference, string{} opt, string aln ) { 
+  # General information
+  string sample        = incfg{"sample"}
+  string normalID      = "$sample-NORMAL"
+  string tumorID       = "$sample-TUMOR"
+  bool isSplit         = incfg{"split"}.parseBool()
+
+  # Files
+  string projectDir    = incfg{"projectDir"}.path()
+  string resultsDir    = incfg{"resultsDir"}.path()
+  string logsDir       = incfg{"logsDir"}.path()
+
+  string finalDir      = projectDir.path() + "/results/$sample/03_SomaticMutations"
+  string smdDir        = projectDir.path() + "/results/$sample/03_SomaticMutations/sniper"
+  string smdLogsDir    = projectDir.path() + "/logs/03_SomaticMutations/sniper"
+
+  if( !smdLogsDir.exists() ) smdLogsDir.mkdir()
+  if( !smdDir.exists() ) smdDir.mkdir()
+  
+  # Get the input files
+  string bamDir = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln"
+  string nBam   = bamDir + "/$normalID.$aln.recalibrated.bam"
+  string tBam   = bamDir + "/$tumorID.$aln.recalibrated.bam"
+  string finalVcf = finalDir + "/$sample.sniper.$aln.final.vcf"
+
+  # Run Split Jobs
+  if( finalVcf <- [nBam, tBam] ) {
+    info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=sniper | Run=true")
+    if( isSplit ) {
+      string tmpDir       = bamDir + "/splitFiles/bam"
+      int nSplits         = callableBeds.size()
+      string[] normalBams = loadSplitBamFiles( nBam, tmpDir, nSplits )
+      string[] tumorBams  = loadSplitBamFiles( tBam, tmpDir, nSplits )
+      string[] allBams
+      allBams.add(normalBams)
+      allBams.add(tumorBams)
+
+      if( finalVcf <- allBams ) { 
+        runSniper( normalBams, tumorBams, callableBeds, smdDir, smdLogsDir, normalID, \
+                   tumorID, sample, aln, opt, finalVcf, isSplit )
+      }
+    }
+
+    #----- NOT SPLIT JOBS -----#
+    else {
+      runSniper( [nBam], [tBam], callableBeds, smdDir, smdLogsDir, normalID, \
+                 tumorID, sample, aln, opt, finalVcf, isSplit )
+    }
+  } else info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=sniper | Run=false")
+}
+
+/**
+ * Runs SomaticSniper on split jobs
+ * @input normalBams input normal split bams
+ * @input tumorBams input tumor split bams
+ * @input intervals input interval list
+ * @input odir output directory
+ * @input ldir log directory
+ * @input normalID normal sample ID
+ * @input tumorID tumor sample ID
+ * @input sample sample ID
+ * @input aln alignment ID
+ * @input opt option map
+ * @input finalVcf final VCF file
+ * @returns a task ID
+ */
+void runSniper( string[] normalBams, string[] tumorBams, string[] intervals, \
+                 string odir, string ldir, string normalID, string tumorID, \
+                 string sample, string aln, string{} opt, string finalVcf, bool isSplit ) {
+  # Run options 
+  string[] modNames = ["sniper_modname"]
+  string mod        = "# Running SomaticSniper"
+  mod               = getModuleString( modNames, mod )
+  string sniperExe  = opt{"sniper_exe"}
+  int runMem        = opt{"sniper_mem"}.parseInt()
+  string pythonExe  = opt{"python_exe"}
+  string fltExe     = opt{"somatic_filter_exe"}
+
+  # Sniper options
+  string reference = opt{"reference"}
+  int minMapQ      = opt{"min_map_q"}.parseInt()
+  string usePriors, priorProb, nHap, maq, hapPrior
+  if( opt.hasKey("sniper_use_priors") && opt{"sniper_use_priors"}.parseBool() ) usePriors = " -J"
+  if( opt.hasKey("sniper_prior_prob") ) priorProb = " -s " + opt{"sniper_prior_prob"}
+  if( opt.hasKey("sniper_n_hap") ) nHap = " -N " + opt{"sniper_n_hap"}
+  if( opt.hasKey("sniper_maq_theta") ) maq = " -T " + opt{"sniper_maq_theta"}
+  if( opt.hasKey("sniper_hap_prior") ) hapPrior = " -r " + opt{"sniper_hap_prior"} 
+
+  # Filter options
+  string fltMinNormalDepth, fltMinTumorDepth, fltMinGqNormal, fltMinGqTumor
+  string fltMinMapqNormal, fltMinMapqTumor, fltMinScore 
+  if( opt.hasKey("filter_min_normal_depth") ) fltMinNormalDepth = " --min-normal-depth " + \
+                                                                  opt{"filter_min_normal_depth"}
+  if( opt.hasKey("filter_min_tumor_depth") ) fltMinTumorDepth = " --min-tumor-depth " + opt{"filter_min_tumor_depth"}
+  if( opt.hasKey("filter_min_normal_gq") ) fltMinGqNormal = " --min-gq-normal " + opt{"filter_min_normal_gq"}
+  if( opt.hasKey("filter_min_tumor_gq") ) fltMinGqTumor = " --min-gq-tumor " + opt{"filter_min_tumor_gq"}
+  if( opt.hasKey("filter_min_normal_mapq") ) fltMinGqNormal = " --min-mapq-normal " + opt{"filter_min_normal_mapq"}
+  if( opt.hasKey("filter_min_tumor_mapq") ) fltMinGqTumor = " --min-mapq-tumor " + opt{"filter_min_tumor_mapq"}
+  if( opt.hasKey("filter_min_somatic_score") ) fltMinScore = " --min-somatic-score " + opt{"filter_min_somatic_score"} 
+
+  # Task list
+  string[] tasks
+  string[] fltVcfs
+
+  # Odir 
+  string opath = odir + "/$aln"
+  if( !opath.exists() ) opath.mkdir() 
+
+  # ---- SPLIT JOBS ---- #
+  if( isSplit) {
+    for( int i=0; i<intervals.size(); i++ ) { 
+      # Inputs
+      string nbam     = normalBams[i]
+      string tbam     = tumorBams[i]
+      string interval = intervals[i]
+
+      # Outputs
+      string rawVcf   = opath + "/$sample.$aln.sniper.$i.vcf"
+      string fltVcf   = opath + "/$sample.$aln.sniper.$i.flt.vcf"
+      string olog     = ldir.path() + "/$sample.$aln.sniper.$i.logs"
+
+      # Run
+      if( rawVcf <- [nbam, tbam] ) {
+        tid := task(rawVcf <- [nbam, tbam], cpus := 1, mem := runMem, taskName := "sniper.$sample.$aln.$i" ) {
+          sys $mod
+          sys $sniperExe$usePriors$priorProb$nHap$maq$hapPrior -q $minMapQ -F vcf -f $reference \
+              $tbam $nbam $rawVcf > $olog 2>&1
+          sys sleep $safeSleep
+        }
+        tasks.add(tid)
+      }
+
+      if( fltVcf <- rawVcf ) {
+        tid := task(fltVcf <- rawVcf, cpus := 1, mem := runMem, taskName := "sniper-filter.$sample.$aln.$i" ) {
+          sys $pythonExe $fltExe sniper$fltMinNormalDepth$fltMinTumorDepth$fltMinGqNormal$fltMinGqTumor \
+              $fltMinMapqNormal$fltMinMapqTumor$fltMinScore --tumor-name $tumorID --normal-name $normalID \
+              --reference $reference $rawVcf $fltVcf >> $olog 2>&1
+          sys sleep $safeSleep
+        } 
+        tasks.add(tid)
+      }
+
+      fltVcfs.add(fltVcf)
+    }
+
+    if( system == "local" ) wait tasks
+    fltVcfs.rmOnExit()
+
+    # Merge
+    mergeVcfs( fltVcfs, finalVcf, ldir, sample, aln, "sniper", opt )
+  }
+
+  # -- NOT SPLIT --#
+  else {
+    # Format VCF
+    string[] vmodList = ["java_modname", "picard_modname"]
+    string vmod       = "# Running format VCF"
+    vmod              = getModuleString( vmodList, vmod )
+    string picardExe  = opt{"picard_exe"}
+    string vcfJavaMem = opt{"picard_vcf_mem"}
+    string vcfMem     = (opt{"picard_vcf_mem"}.parseInt() + 1) * G
+    string vcfJava    = "$baseJava -Xmx" + vcfJavaMem + "G -jar"
+
+    # Inputs
+    string nbam       = normalBams[0]
+    string tbam       = tumorBams[0]
+    string interval   = intervals[0]
+
+    # Outputs
+    string rawVcf     = opath + "/$sample.$aln.sniper.vcf"
+    string fltVcf     = opath + "/$sample.$aln.sniper.flt.vcf"
+    string olog       = ldir.path() + "/$sample.$aln.sniper.logs"
+
+    # Run
+    dep(rawVcf <- [nbam, tbam], cpus := 1, mem := runMem, taskName := "sniper.$sample.$aln" ) {
+      sys $mod
+      sys $sniperExe$usePriors$priorProb$nHap$maq$hapPrior -q $minMapQ -F vcf -f $reference \
+          $tbam $nbam $rawVcf > $olog 2>&1
+      sys sleep $safeSleep
+    }
+
+    dep(fltVcf <- rawVcf, cpus := 1, mem := runMem, taskName := "sniper-filter.$sample.$aln" ) {
+        sys $pythonExe $fltExe sniper$fltMinNormalDepth$fltMinTumorDepth$fltMinGqNormal$fltMinGqTumor \
+            $fltMinMapqNormal$fltMinMapqTumor$fltMinScore --tumor-name $tumorID --normal-name $normalID \
+            --reference $reference $rawVcf $fltVcf >> $olog 2>&1
+        sys sleep $safeSleep
+    } 
+
+    dep( finalVcf <- fltVcf, cpus := 1, mem := vcfMem, taskName := "sniper-format.$sample.$aln" ) {
+      sys $vmod
+      sys $vcfJava $picardExe/VcfFormatConverter.jar INPUT=$fltVcf OUTPUT=$finalVcf \
+          REQUIRE_INDEX=false >> $olog 2>&1
+      sys sleep $safeSleep
+    }
+
+    goal( finalVcf )
+  }
+
+}
+
+/**
+ * Runs SomaticSniper on split jobs
+ * @input normalBams input normal split bams
+ * @input tumorBams input tumor split bams
+ * @input intervals input interval list
+ * @input odir output directory
+ * @input ldir log directory
+ * @input normalID normal sample ID
+ * @input tumorID tumor sample ID
+ * @input sample sample ID
+ * @input aln alignment ID
+ * @input opt option map
+ * @input finalVcf final VCF file
+ * @returns a task ID
+void runSniper( string nbam, string tbam, string intervals, \
+                string odir, string ldir, string normalID, string tumorID, \
+                string sample, string aln, string{} opt, string finalVcf ) {
+
+  # Run options 
+  string[] modNames = ["sniper_modname"]
+  string mod        = "# Running SomaticSniper"
+  mod               = getModuleString( modNames, mod )
+  string sniperExe  = opt{"sniper_exe"}
+  int runMem        = opt{"sniper_mem"}.parseInt()
+  string pythonExe  = opt{"python_exe"}
+  string fltExe     = opt{"somatic_filter_exe"}
+
+  # Sniper options
+  string reference = opt{"reference"}
+  int minMapQ      = opt{"min_map_q"}.parseInt()
+  string usePriors, priorProb, nHap, maq, hapPrior
+  if( opt.hasKey("sniper_use_priors") && opt{"sniper_use_priors"}.parseBool() ) usePriors = " -J"
+  if( opt.hasKey("sniper_prior_prob") ) priorProb = " -s " + opt{"sniper_prior_prob"}
+  if( opt.hasKey("sniper_n_hap") ) nHap = " -N " + opt{"sniper_n_hap"}
+  if( opt.hasKey("sniper_maq_theta") ) maq = " -T " + opt{"sniper_maq_theta"}
+  if( opt.hasKey("sniper_hap_prior") ) hapPrior = " -r " + opt{"sniper_hap_prior"} 
+
+  # Filter options
+  string fltMinNormalDepth, fltMinTumorDepth, fltMinGqNormal, fltMinGqTumor
+  string fltMinMapqNormal, fltMinMapqTumor, fltMinScore 
+  if( opt.hasKey("filter_min_normal_depth") ) fltMinNormalDepth = " --min-normal-depth " + \
+                                                                  opt{"filter_min_normal_depth"}
+  if( opt.hasKey("filter_min_tumor_depth") ) fltMinTumorDepth = " --min-tumor-depth " + opt{"filter_min_tumor_depth"}
+  if( opt.hasKey("filter_min_normal_gq") ) fltMinGqNormal = " --min-gq-normal " + opt{"filter_min_normal_gq"}
+  if( opt.hasKey("filter_min_tumor_gq") ) fltMinGqTumor = " --min-gq-tumor " + opt{"filter_min_tumor_gq"}
+  if( opt.hasKey("filter_min_normal_mapq") ) fltMinGqNormal = " --min-mapq-normal " + opt{"filter_min_normal_mapq"}
+  if( opt.hasKey("filter_min_tumor_mapq") ) fltMinGqTumor = " --min-mapq-tumor " + opt{"filter_min_tumor_mapq"}
+  if( opt.hasKey("filter_min_somatic_score") ) fltMinScore = " --min-somatic-score " + opt{"filter_min_somatic_score"} 
+
+  # Format VCF
+  string[] vmodList = ["java_modname", "picard_modname"]
+  string vmod       = "# Running format VCF"
+  vmod              = getModuleString( vmodList, vmod )
+  string picardExe  = opt{"picard_exe"}
+  string vcfJavaMem = opt{"picard_vcf_mem"}
+  string vcfMem     = (opt{"picard_vcf_mem"}.parseInt() + 1) * G
+  string vcfJava    = "$baseJava -Xmx" + vcfJavaMem + "G -jar"
+
+  # Loop over each interval and run 
+  string opath = odir + "/$aln"
+  if( !opath.exists() ) opath.mkdir() 
+
+  # Outputs
+  string rawVcf   = opath + "/$sample.$aln.sniper.vcf"
+  string fltVcf   = opath + "/$sample.$aln.sniper.flt.vcf"
+  string olog     = ldir.path() + "/$sample.$aln.sniper.logs"
+
+  # Run
+  dep(rawVcf <- [nbam, tbam], cpus := 1, mem := runMem ) {
+    sys $mod
+    sys $sniperExe$usePriors$priorProb$nHap$maq$hapPrior -q $minMapQ -F vcf -f $reference \
+        $tbam $nbam $rawVcf > $olog 2>&1
+  }
+
+  dep(fltVcf <- rawVcf, cpus := 1, mem := runMem ) {
+      sys $pythonExe $fltExe sniper$fltMinNormalDepth$fltMinTumorDepth$fltMinGqNormal$fltMinGqTumor \
+          $fltMinMapqNormal$fltMinMapqTumor$fltMinScore --tumor-name $tumorID --normal-name $normalID \
+          --reference $reference $rawVcf $fltVcf >> $olog 2>&1
+  } 
+
+  dep( finalVcf <- fltVcf, cpus := 1, mem := vcfMem ) {
+    sys $vmod
+    sys $vcfJava $picardExe/VcfFormatConverter.jar INPUT=$fltVcf OUTPUT=$finalVcf \
+        REQUIRE_INDEX=false >> $olog 2>&1
+  }
+
+  goal( finalVcf )
+}*/

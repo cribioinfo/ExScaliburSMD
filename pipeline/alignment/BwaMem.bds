@@ -1,0 +1,384 @@
+#!/usr/bin/env bds
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+include "utils.bds"
+include "picard.bds"
+
+/** bwaMemAndPostprocess
+ * runs bwa mem alignment, merging, deduping and collects various metrics.
+ * 
+ * @input incfg the sample config map 
+ * @input reference the reference fasta
+ * @input opt the option map
+ * @input waitTasks preprocessing tasks to wait on
+ * @return a list of task IDs 
+ */ 
+void BwaMemAndPostprocess( string{} incfg, string reference, string{} opt ) {
+  # General information
+  string sample        = incfg{"sample"}
+  string[] tlist       = ["NORMAL", "TUMOR"] 
+  string[] pids
+
+  for (string stype : tlist ) { 
+    pid := par ParallelBwaMem( sample, incfg, stype, opt )
+    pids.add(pid)
+  }
+
+  # -- SAFE GUARD
+  wait pids
+}
+
+void ParallelBwaMem( string sample, string{} incfg, string stype, string{} opt ) {
+  # Files
+  string referenceName = opt{"reference_name"}
+  string projectDir    = incfg{"projectDir"}.path()
+  string resultsDir    = incfg{"resultsDir"}.path()
+  string logsDir       = incfg{"logsDir"}.path()
+  string alnDir        = projectDir.path() + "/results/$sample/01_Alignments/bwa_mem"
+  string alnLogsDir    = projectDir.path() + "/logs/01_Alignments/bwa_mem"
+
+  if( !alnLogsDir.exists() ) alnLogsDir.mkdir()
+  if( !alnDir.exists() ) alnDir.mkdir()
+
+  #-- NORMAL 
+  if( stype == "NORMAL" ) {
+    string[] normalCfgs        = incfg{"normalConfigs"}.split(",")
+    string normalID            = "$sample-NORMAL"
+    string normalMergeLogs     = alnLogsDir + "/$normalID.bwa_mem.merge.logs"
+    string normalMergeBam      = alnDir + "/$normalID.bwa_mem.bam"
+    string normalDedupBam      = alnDir + "/$normalID.bwa_mem.dedup.bam"
+    string normalDedupLogs     = alnLogsDir + "/$normalID.bwa_mem.dedup.logs"
+    string normalMetricsLogs   = alnLogsDir + "/$normalID.bwa_mem.metrics.logs"
+    string normalMetricsPrefix = alnDir + "/$normalID.bwa_mem.metrics"
+    string normalCoverageFile  = alnDir + "/$normalID.bwa_mem.$referenceName.exons.bed"
+    string[] normalGrpFqs = getFastqs( normalCfgs )
+    string[] normalFqs
+    for( string f : normalGrpFqs ) {
+      normalFqs.add( f.split(",") )
+    }
+
+    # Check complex dependency
+    if( normalDedupBam <- normalFqs ) {
+      # Will mark these for removal
+      string[] tmpFiles
+
+      # Map fastqs
+      string{} results   = sampleBwaMemMap( normalCfgs, reference, opt, alnDir, alnLogsDir )
+      string[] currBams  = results{"bams"}.split(",")
+      string[] currOther = results{"others"}.split(",")
+      string[] tids      = results{"tids"}.split(",")
+      #tmpFiles.add(currOther)
+
+      #-- SAFE GUARD
+      wait tids
+
+      # Merge
+      string mergeTask = mergeBams( currBams, normalMergeBam, normalMergeLogs, normalID, "bwa_mem", opt )
+      #tmpFiles.add( [normalMergeBam, normalMergeBam.swapExt("bam", "bai") ] )
+
+      # Dedup
+      string ntid = dedupBam( normalMergeBam, normalDedupBam, normalDedupLogs, normalID, "bwa_mem", opt )
+ 
+      # Mark tmp files for removal
+      #tmpFiles.rmOnExit()
+
+      # Metrics
+      collectMetrics( normalDedupBam, normalMetricsPrefix, normalCoverageFile, normalMetricsLogs, \
+                      normalID, "bwa_mem", opt )
+    } else info("Sample=$sample | Phenotype=NORMAL | Task=Alignments | Aln=bwa_mem | Run=false") 
+
+  }
+
+  #-- TUMOR 
+  else {
+    #-- FILES
+    string[] tumorCfgs   = incfg{"tumorConfigs"}.split(",")
+    string tumorID       = "$sample-TUMOR"
+    string tumorMergeLogs     = alnLogsDir + "/$tumorID.bwa_mem.merge.logs"
+    string tumorMergeBam      = alnDir + "/$tumorID.bwa_mem.bam"
+    string tumorDedupBam      = alnDir + "/$tumorID.bwa_mem.dedup.bam"
+    string tumorDedupLogs     = alnLogsDir + "/$tumorID.bwa_mem.dedup.logs"
+    string tumorMetricsLogs   = alnLogsDir + "/$tumorID.bwa_mem.metrics.logs"
+    string tumorMetricsPrefix = alnDir + "/$tumorID.bwa_mem.metrics"
+    string tumorCoverageFile  = alnDir + "/$tumorID.bwa_mem.$referenceName.exons.bed"
+    string[] tumorGrpFqs = getFastqs( tumorCfgs )
+    string[] tumorFqs
+    for( string f : tumorGrpFqs ) {
+      tumorFqs.add( f.split(",") )
+    }
+
+    # Complex dependency
+    if( tumorDedupBam <- tumorFqs ) {
+      # Will mark these for removal
+      #string[] tmpFiles
+
+      # Map fastqs
+      string{} results   = sampleBwaMemMap( tumorCfgs, reference, opt, alnDir, alnLogsDir )
+      string[] currBams  = results{"bams"}.split(",")
+      string[] currOther = results{"others"}.split(",")
+      string[] tids      = results{"tids"}.split(",")
+      #tmpFiles.add(currOther)
+
+      #-- SAFE GUARD
+      wait tids
+
+      # Merge
+      string mergeTask = mergeBams( currBams, tumorMergeBam, tumorMergeLogs, tumorID, "bwa_mem", opt )
+      #tmpFiles.add( [tumorMergeBam, tumorMergeBam.swapExt("bam", "bai") ] )
+
+      # Dedup
+      string ttid = dedupBam( tumorMergeBam, tumorDedupBam, tumorDedupLogs, tumorID, "bwa_mem", opt )
+
+      # Mark tmp files for removal
+      #tmpFiles.rmOnExit()
+
+      # Metrics
+      collectMetrics( tumorDedupBam, tumorMetricsPrefix, tumorCoverageFile, tumorMetricsLogs, \
+                      tumorID, "bwa_mem", opt )
+    } else info("Sample=$sample | Phenotype=TUMOR | Task=Alignments | Aln=bwa_mem | Run=false") 
+  }
+}
+
+/**
+ * Runs bwa mem 
+ * @input cfgs the list of readgroup configs for this sample
+ * @input fqs the list of input fastqs for this sample
+ * @input reference the reference fasta
+ * @input opt the option map
+ * @input alnDir the alignment output directory
+ * @input alnLogsDir the alignment logs output directory
+ * @returns a map of bams, other files, raw fastqs and alignment tasks
+ */
+string{} sampleBwaMemMap( string[] cfgs, string reference, string{} opt, string alnDir, string alnLogsDir ) {
+
+  # Return lists
+  string[] others
+  string[] bams
+  string[] tids
+
+  # Bwa options
+  string bwaMemExe   = opt{"bwa_mem_exe"}
+  int bwaMemThreads  = opt{"bwa_mem_threads"}.parseInt()
+  string samtoolsExe = opt{"samtools_exe"}
+  int minMapQ        = opt{"min_map_q"}.parseInt()
+  string maxOccurOpt
+  if( opt.hasKey("bwa_mem_max_occur") ) maxOccurOpt = " -c " + opt{"bwa_mem_max_occur"}
+
+  # Run settings
+  string[] modNames = ["bwa_mem_modname", "samtools_modname"]
+  string mods       = "# Running bwa_mem" 
+  int bwaMemMem     = opt{"bwa_mem_mem"}.parseInt() * G
+  bwaMemMem         = getMemorySize( bwaMemMem, bwaMemThreads )
+  mods              = getModuleString( modNames, mods )
+
+  for( int i=0 ; i < cfgs.size() ; i++ ) {
+    # Ins
+    string{} cfg   = config(cfgs[i])
+    string[] fqLst = getFastqsRG( cfg ) 
+
+    # Readgroup information
+    int offset   = cfg{"offset"}.parseInt()
+    bool clip    = cfg{"clip"}.parseBool()
+    bool paired  = cfg{"paired"}.parseBool()
+    string rgid  = cfg{"readgroup"}
+    string rgString = cfg{"rgstring"}
+
+    # Output Files
+    string rawBam1
+    string rawBam2
+    string sortPfx1
+    string sortPfx2
+    string sortBam1
+    string sortBam2 
+
+    # Log Files
+    string alnLog = alnLogsDir + "/$rgid.bwa_mem.aln.logs"
+
+    # Bwa options
+    string offsetOpt
+    if( offset != 33 ) {
+      if( !paired ) { offsetOpt = " -I" }
+      else {
+        if( !clip ) { offsetOpt = " -I" }
+      }
+    }
+
+    #-- PAIRED & CLIPPED --#
+    if( fqLst.size() == 3 ) {
+      string{} resMap = bwaMemPairedAndClipped( fqLst[0], fqLst[1], fqLst[2], rgid, rgString, sample, \
+                                                alnDir, bwaMemExe, bwaMemThreads, bwaMemMem, samtoolsExe, \
+                                                minMapQ, maxOccurOpt, offsetOpt, alnLog, mods )
+      bams.add( resMap{"bams"}.split(",") )
+      others.add( resMap{"tmps"}.split(",") )
+      tids.add( resMap{"tid"} )
+    } 
+
+    #-- PAIRED & !CLIPPED --#
+    else if( fqLst.size() == 2 ) {
+      string{} resMap = bwaMemPairedNotClipped( fqLst[0], fqLst[1], rgid, rgString, sample, \
+                                                alnDir, bwaMemExe, bwaMemThreads, bwaMemMem, samtoolsExe, \
+                                                minMapQ, maxOccurOpt, offsetOpt, alnLog, mods )
+      bams.add( resMap{"bams"}.split(",") )
+      others.add( resMap{"tmps"}.split(",") )
+      tids.add( resMap{"tid"} )
+    } 
+
+    #-- SINGLE END --#
+    else if( fqLst.size() == 1 ) {
+      string{} resMap = bwaMemSingle( fqLst[0], rgid, rgString, sample, \
+                                      alnDir, bwaMemExe, bwaMemThreads, bwaMemMem, samtoolsExe, \
+                                      minMapQ, maxOccurOpt, offsetOpt, alnLog, mods )
+      bams.add( resMap{"bams"}.split(",") )
+      others.add( resMap{"tmps"}.split(",") )
+      tids.add( resMap{"tid"} )
+    }
+  }
+
+  # Return map
+  string{} retMap = {"bams" => bams.join(","), "others" => others.join(","), "tids" => tids.join(",")} 
+  return( retMap )
+}
+
+string{} bwaMemPairedAndClipped( string fq1, string fq2, string fq3, string rgid, string rgString, \
+                                 string sample, string alnDir, string bwaMemExe, int bwaMemThreads, \
+                                 int bwaMemMem, string samtoolsExe, int minMapQ, string maxOccurOpt, \
+                                 string offsetOpt, string alnLog, string mods ) { 
+  # Outputs
+  string tmpDir   = alnDir + "/tmp"
+  string rawBam1  = tmpDir + "/$rgid.bwa_mem.paired.bam"
+  string rawBam2  = tmpDir + "/$rgid.bwa_mem.merged.bam"
+  string sortPfx1 = tmpDir + "/$rgid.bwa_mem.paired.sort"
+  string sortPfx2 = tmpDir + "/$rgid.bwa_mem.merged.sort"
+  string sortBam1 = tmpDir + "/$rgid.bwa_mem.paired.sort.bam"
+  string sortBam2 = tmpDir + "/$rgid.bwa_mem.merged.sort.bam"
+  if( !tmpDir.exists() ) tmpDir.mkdir()
+
+  # Run
+  string tid
+  if( [ sortBam1, sortBam2 ] <- [fq1, fq2, fq3] ) {
+    info("Sample=$sample | Readgroup=$rgid | Task=BwaMem | Run=true")
+    tid = task( [ sortBam1, sortBam2 ] <- [fq1, fq2, fq3], cpus := bwaMemThreads, mem := bwaMemMem, taskName := "bwa_mem.$rgid" ) {
+      sys set -o pipefail
+      sys $mods
+      sys echo "*****Running paired-end*****" > $alnLog
+      sys $bwaMemExe mem -t $bwaMemThreads$maxOccurOpt -R $rgString -M $reference $fq1 $fq2 2>> $alnLog \
+          | $samtoolsExe view -q $minMapQ -F 4 -SbT $reference - > $rawBam1 2>> $alnLog
+      sys sleep 1
+      sys $samtoolsExe sort -@ $bwaMemThreads $rawBam1 $sortPfx1 2>> $alnLog
+      sys sleep 1
+      sys $samtoolsExe index $sortBam1 2>> $alnLog
+      sys sleep 1
+      sys echo "*****Running merged pairs*****" >> $alnLog
+      sys $bwaMemExe mem -t $bwaMemThreads$maxOccurOpt -R $rgString -M $reference $fq3 2>> $alnLog \
+          | $samtoolsExe view -q $minMapQ -F 4 -SbT $reference - > $rawBam2 2>> $alnLog
+      sys sleep 1
+      sys $samtoolsExe sort -@ $bwaMemThreads $rawBam2 $sortPfx2 2>> $alnLog
+      sys sleep 1
+      sys $samtoolsExe index $sortBam2 2>> $alnLog
+      sys sleep $safeSleep
+    }
+  } else info("Sample=$sample | Readgroup=$rgid | Task=BwaMem | Run=false")
+ 
+  # Add bams to bam list 
+  string[] bams = [sortBam1, sortBam2]
+
+  # Add others to others list
+  string[] tmps = [rawBam1, rawBam1 + ".bai", rawBam2, rawBam2 + ".bai"]
+  
+  # Return map
+  string{} rmap = {"bams" => bams.join(","), "tmps" => tmps.join(","), "tid" => tid}
+  return rmap
+}
+
+string{} bwaMemPairedNotClipped( string fq1, string fq2, string rgid, string rgString, \
+                                 string sample, string alnDir, string bwaMemExe, int bwaMemThreads, \
+                                 int bwaMemMem, string samtoolsExe, int minMapQ, string maxOccurOpt, \
+                                 string offsetOpt, string alnLog, string mods ) { 
+  # Outputs
+  string tmpDir = alnDir + "/tmp"
+  string rawBam1  = tmpDir + "/$rgid.bwa_mem.paired.bam"
+  string sortPfx1 = tmpDir + "/$rgid.bwa_mem.paired.sort"
+  string sortBam1 = tmpDir + "/$rgid.bwa_mem.paired.sort.bam"
+  if( !tmpDir.exists() ) tmpDir.mkdir()
+
+  # Run
+  string tid
+  if( sortBam1 <- [fq1, fq2] ) {
+    info("Sample=$sample | Readgroup=$rgid | Task=BwaMem | Run=true")
+    tid = task( sortBam1 <- [fq1, fq2], cpus := bwaMemThreads, mem := bwaMemMem, taskName := "bwa_mem.$rgid" ) {
+      sys set -o pipefail
+      sys $mods
+      sys echo "*****Running paired-end*****" > $alnLog
+      sys $bwaMemExe mem -t $bwaMemThreads$maxOccurOpt -R $rgString -M $reference $fq1 $fq2 2>> $alnLog \
+          | $samtoolsExe view -q $minMapQ -F 4 -SbT $reference - > $rawBam1 2>> $alnLog
+      sys sleep 1
+      sys $samtoolsExe sort -@ $bwaMemThreads $rawBam1 $sortPfx1 2>> $alnLog
+      sys sleep 1
+      sys $samtoolsExe index $sortBam1 2>> $alnLog
+      sys sleep $safeSleep
+    }
+  } else info("Sample=$sample | Readgroup=$rgid | Task=BwaMem | Run=false")
+     
+  # Add bams to bam list 
+  string[] bams = [sortBam1] 
+
+  # Add others to others list
+  string[] tmps = [rawBam1, rawBam1 + ".bai"] 
+  
+  # Return map
+  string{} rmap = {"bams" => bams.join(","), "tmps" => tmps.join(","), "tid" => tid}
+  return rmap
+}
+
+string{} bwaMemSingle( string fq1, string rgid, string rgString, \
+                       string sample, string alnDir, string bwaMemExe, int bwaMemThreads, \
+                       int bwaMemMem, string samtoolsExe, int minMapQ, string maxOccurOpt, \
+                       string offsetOpt, string alnLog, string mods ) { 
+  # Outputs
+  string tmpDir   = alnDir + "/tmp"
+  string rawBam1  = tmpDir + "/$rgid.bwa_mem.single.bam"
+  string sortPfx1 = tmpDir + "/$rgid.bwa_mem.single.sort"
+  string sortBam1 = tmpDir + "/$rgid.bwa_mem.single.sort.bam"
+  if( !tmpDir.exists() ) tmpDir.mkdir()
+
+  # Run
+  string tid
+  if( sortBam1 <- fq1 ) {
+    info("Sample=$sample | Readgroup=$rgid | Task=BwaMem | Run=true")
+    tid = task( sortBam1 <- fq1, cpus := bwaMemThreads, mem := bwaMemMem, taskName := "bwa_mem.$rgid" ) {
+      sys set -o pipefail
+      sys $mods
+      sys echo "*****Running single-end*****" > $alnLog
+      sys $bwaMemExe mem -t $bwaMemThreads$maxOccurOpt -R $rgString -M $reference $fq1 2>> $alnLog \
+          | $samtoolsExe view -q $minMapQ -F 4 -SbT $reference - > $rawBam1 2>> $alnLog
+      sys sleep 1
+      sys $samtoolsExe sort -@ $bwaMemThreads $rawBam1 $sortPfx1 2>> $alnLog
+      sys sleep 1
+      sys $samtoolsExe index $sortBam1 2>> $alnLog
+      sys sleep $safeSleep
+    }
+  } else info("Sample=$sample | Readgroup=$rgid | Task=BwaMem | Run=false")
+     
+  # Add bams to bam list 
+  string[] bams = [sortBam1] 
+
+  # Add others to others list
+  string[] tmps = [rawBam1, rawBam1 + ".bai"] 
+  
+  # Return map
+  string{} rmap = {"bams" => bams.join(","), "tmps" => tmps.join(","), "tid" => tid}
+  return rmap
+} 

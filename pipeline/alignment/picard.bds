@@ -1,0 +1,123 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+/**
+ * Merges a list of BAM files
+ * @input rawBams list of bam files to merge
+ * @input outputMergedBam the output merged bam file
+ * @input fqs the list of fastq dependencies
+ * @input opt the option map
+ * @returns a task ID
+ */
+string mergeBams( string[] rawBams, string outputMergedBam, string logs, \
+                  string sampID, string aln, string{} opt ) {
+  # Run parameters
+  string[] modNames = ["java_modname", "picard_modname"] 
+  string mod        = "# Merging $rawBams"
+  mod               = getModuleString( modNames, mod )
+ 
+  string picardExe                    = opt{"picard_exe"}
+  int picardMergeAlignmentsMem        = (opt{"picard_merge_alignments_mem"}.parseInt() + 1 ) * G
+  picardMergeAlignmentsMem            = getMemorySize( picardMergeAlignmentsMem, 2 )
+  string picardMergeAlignmentsJavaMem = opt{"picard_merge_alignments_mem"}
+  string javaMerge                    = "$baseJava -Xmx" + picardMergeAlignmentsJavaMem + "G -jar"
+  string bamString                    = rawBams.join(" I=")
+  
+  # Return task
+  string tid
+
+  # Check deps
+  if( outputMergedBam <- rawBams ) {
+    tid = task( outputMergedBam <- rawBams, cpus := 2, mem := picardMergeAlignmentsMem, \
+                taskName := "mergebam.$sampID.$aln" ) {
+      sys $mod
+      sys $javaMerge $picardExe/MergeSamFiles.jar I=$bamString O=$outputMergedBam SORT_ORDER=coordinate \
+          ASSUME_SORTED=true \
+          USE_THREADING=true CREATE_INDEX=true > $logs 2>&1
+      sys sleep $safeSleep
+    }
+  }
+
+  return( tid )
+}
+
+/**
+ * Marks PCR Duplicates 
+ * @input inBam the bam file to mark duplicates 
+ * @input obam the output bam file with duplicates marked 
+ * @input opt the option map
+ * @returns a task ID
+ */
+string dedupBam( string inBam, string obam, string logs, string sampID, string aln, string{} opt ) {
+  # Run parameters
+  string dedupMetrics = inBam.swapExt("bam", "dedup_metrics")
+  string[] modNames   = ["java_modname", "picard_modname"]
+  string mod          = "# Dedup $inBam"
+  mod                 = getModuleString( modNames, mod )
+  string picardExe    = opt{"picard_exe"}
+  int picardDedupMem  = (opt{"picard_dedup_mem"}.parseInt() + 1 ) * G
+  string picardDedupJavaMem = opt{"picard_dedup_mem"}
+  string javaDedup = "$baseJava -Xmx" + picardDedupJavaMem + "G -jar" 
+
+  string tid
+  if( obam <- inBam ) {
+    tid = task( obam <- inBam, cpus := 1, mem := picardDedupMem, taskName := "dedup.$sampID.$aln" ) {
+      sys $mod
+      sys $javaDedup $picardExe/MarkDuplicates.jar INPUT=$inBam OUTPUT=$obam ASSUME_SORTED=true \
+          CREATE_INDEX=true METRICS_FILE=$dedupMetrics > $logs 2>&1
+      sys sleep $safeSleep
+    }
+  }
+  return( tid )
+}
+
+/**
+ * Collected various alignment metrics and coverage 
+ * @input inBam the bam file to analyze 
+ * @input pfx the metrics files prefix 
+ * @input coverageFile the output coverage file 
+ * @input opt the option map
+ * @input tid the task to wait on 
+ * @returns nothing 
+ */
+void collectMetrics( string inBam, string pfx, string coverageFile, string logs, \
+                     string sampID, string aln, string{} opt ) {
+  # Run parameters
+  string picardExe   = opt{"picard_exe"}
+  string bedtoolsExe = opt{"bedtools_exe"}
+  string mods        = "# Collecting alignment metrics for $inBam"
+  string[] modNames  = ["java_modname", "picard_modname", "bedtools_modname"]
+  mods               = getModuleString( modNames, mods )
+  string picardMetricsJavaMem = opt{"picard_metrics_mem"}
+  int picardMetricsMem = (opt{"picard_metrics_mem"}.parseInt() + 1 ) * G
+  string javaMetrics   = "$baseJava -Xmx" + picardMetricsJavaMem + "G -jar"
+
+  # Input coverage files
+  string exonsBed = opt{"exons_bed"}
+  string reference = opt{"reference"}
+
+  if( coverageFile <- inBam ) {
+    task( coverageFile <- inBam, cpus := 1, mem := picardMetricsMem, taskName := "metrics.$sampID.$aln" ) {
+      sys $mods
+      sys $javaMetrics $picardExe/CollectMultipleMetrics.jar I=$inBam O=$pfx REFERENCE_SEQUENCE=$reference \
+          VALIDATION_STRINGENCY=SILENT \
+          PROGRAM=CollectAlignmentSummaryMetrics PROGRAM=CollectInsertSizeMetrics \
+          PROGRAM=QualityScoreDistribution PROGRAM=MeanQualityByCycle > $logs 2>&1
+      sys $bedtoolsExe coverage -abam $inBam -b $exonsBed -hist | grep all > $coverageFile 2>> $logs
+      sys sleep $safeSleep
+    }
+  }
+}

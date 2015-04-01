@@ -1,0 +1,128 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+include "../utils/BamUtils.bds"
+
+/** 
+ * Runs MuTect and somatic filtration
+ * @input incfg the sample config map
+ * @input reference the reference fasta
+ * @input opt the option map
+ * @input aln the alignment ID
+ * @returns the task ID
+ */
+void VirmidAndFilter( string{} incfg, string reference, string{} opt, string aln ) { 
+
+  # General information
+  string sample        = incfg{"sample"}
+  string normalID      = "$sample-NORMAL"
+  string tumorID       = "$sample-TUMOR"
+  bool isSplit         = incfg{"split"}.parseBool()
+
+  # Files
+  string projectDir    = incfg{"projectDir"}.path()
+  string resultsDir    = incfg{"resultsDir"}.path()
+  string logsDir       = incfg{"logsDir"}.path()
+
+  string finalDir      = projectDir.path() + "/results/$sample/03_SomaticMutations"
+  string smdDir        = projectDir.path() + "/results/$sample/03_SomaticMutations/virmid"
+  string smdLogsDir    = projectDir.path() + "/logs/03_SomaticMutations/virmid"
+
+  if( !smdLogsDir.exists() ) smdLogsDir.mkdir()
+  if( !smdDir.exists() ) smdDir.mkdir()
+  
+  # Get the input/output files
+  string bamDir   = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln"
+  string nBam     = bamDir + "/$normalID.$aln.recalibrated.bam"
+  string tBam     = bamDir + "/$tumorID.$aln.recalibrated.bam"
+  string runDir   = "$smdDir/$aln"
+  if( !runDir.exists() ) runDir.mkdir()
+  string germline = "$runDir/$tumorID.$aln.recalibrated.bam.virmid.germ.all.vcf"
+  string somatic  = "$runDir/$tumorID.$aln.recalibrated.bam.virmid.som.all.vcf"
+  string loh      = "$runDir/$tumorID.$aln.recalibrated.bam.virmid.loh.all.vcf"
+  string fltVcf   = "$runDir/$sample.virmid.$aln.flt.vcf"
+  string finalVcf = finalDir + "/$sample.virmid.$aln.final.vcf"
+  string runLogs  = smdLogsDir + "/$sample.virmid.$aln.run.logs" 
+  string fmtLogs  = smdLogsDir + "/$sample.virmid.$aln.fmt.logs" 
+
+  # Isn't a split job
+  # Run options 
+  string[] modNames = ["java_modname", "virmid_modname"]
+  string mod        = "# Running Virmid"
+  mod               = getModuleString( modNames, mod )
+
+  string maxTraining
+  string maxDp     = opt{"virmid_max_dp"}
+
+  string virmidExe = opt{"virmid_exe"}
+  string javaMem   = opt{"virmid_mem"}
+  int runMem       = ( opt{"virmid_mem"}.parseInt() + 1) * G
+  string pythonExe = opt{"python_exe"}
+  string fltExe    = opt{"somatic_filter_exe"}
+  string java      = "java -Xmx" + javaMem + "G -jar $virmidExe"
+  string minMapQ   = opt{"min_map_q"}
+  if( opt.hasKey("virmid_max_training_sampling") ) maxTraining = " -p " + opt{"virmid_max_training_sampling"}
+
+  # Filter options
+  string fltMinNormalDepth, fltMinTumorDepth, fltMaxFreqNormal, fltMinFreqTumor, fltMinQual
+  if( opt.hasKey("filter_min_normal_depth") ) fltMinNormalDepth = " --min-normal-depth " + \
+                                                                  opt{"filter_min_normal_depth"}
+  if( opt.hasKey("filter_min_tumor_depth") ) fltMinTumorDepth = " --min-tumor-depth " + \
+                                                                  opt{"filter_min_tumor_depth"}
+  if( opt.hasKey("filter_max_alt_freq_normal") ) fltMaxFreqNormal = " --max-alt-freq-normal " + \
+                                                                  opt{"filter_max_alt_freq_normal"}
+  if( opt.hasKey("filter_min_alt_freq_tumor") ) fltMinFreqTumor = " --min-alt-freq-tumor " + \
+                                                                  opt{"filter_min_alt_freq_tumor"}
+  if( opt.hasKey("filter_min_qual") ) fltMinQual = " --min-qual " + opt{"filter_min_qual"}
+
+  # Format VCF
+  string[] vmodList = ["java_modname", "picard_modname"]
+  string vmod       = "# Running format VCF"
+  vmod              = getModuleString( vmodList, vmod )
+  string picardExe  = opt{"picard_exe"}
+  string vcfJavaMem = opt{"picard_vcf_mem"}
+  int vcfMem        = (opt{"picard_vcf_mem"}.parseInt() + 1 ) * G
+  string vcfJava    = "$baseJava -Xmx" + vcfJavaMem + "G -jar" 
+
+  # Run
+  if( finalVcf <- [nBam, tBam] ) {
+    info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=virmid | Run=true")
+    task( [germline, somatic, loh] <- [nBam, tBam], cpus := 1, mem := runMem, \
+          taskName := "virmid.$sample.$aln" ) {
+      sys $mod
+      sys $java -R $reference -D $tBam -N $nBam -w $runDir -t 1 -M $maxDp -f \
+          -q $minMapQ$maxTraining > $runLogs 2>&1 
+      sys sleep $safeSleep
+    } 
+
+    # Filter
+    task( fltVcf <- [germline, somatic, loh], cpus := 1, mem = runMem, \
+          taskName := "virmid-filter.$sample.$aln" ) {
+      sys $pythonExe $fltExe virmid$fltMinNormalDepth$fltMinTumorDepth$fltMaxFreqNormal\
+          $fltMinFreqTumor$fltMinQual --tumor-name $tumorID --normal-name $normalID \
+          --reference $reference $somatic $germline $loh $fltVcf >> $runLogs 2>&1
+      sys sleep $safeSleep
+    }
+
+    # Format VCF
+    task( finalVcf <- fltVcf, cpus := 1, mem = runMem, \
+          taskName := "virmid-format.$sample.$aln" ) {
+      sys $vmod
+      sys $vcfJava $picardExe/VcfFormatConverter.jar INPUT=$fltVcf OUTPUT=$finalVcf \
+          REQUIRE_INDEX=false > $fmtLogs 2>&1
+      sys sleep $safeSleep
+    }
+  } else info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=virmid | Run=false")
+}

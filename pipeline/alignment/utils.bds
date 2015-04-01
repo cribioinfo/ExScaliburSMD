@@ -1,0 +1,120 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/** 
+  * Returns a list of all the fastq input files for a given sample
+  * @input cfgList a list of configuration files for each readgroup of the current sample 
+  * @return a list of all input fastq files
+  */
+string[] getFastqs( string[] cfgList ) {
+  string[] lst
+  for( string c : cfgList ) {
+    if( !c.canRead() ) error "unable to read $c"
+
+    # Readgroup config map
+    string{} cfg = config(c)
+
+    # Readgroup information
+    int offset   = cfg{"offset"}.parseInt()
+    bool clip    = cfg{"clip"}.parseBool()
+    bool paired  = cfg{"paired"}.parseBool()
+    string rgid  = cfg{"readgroup"}
+
+    # fqs 
+    string fq1
+    string fq2
+    string fq3
+    string[] curr
+
+    # Set IO files
+    if( clip ) {
+      # Outputs
+      string fqDir = cfg{"clipResultsDir"}.path()
+      if( paired ) {
+        fq1   = fqDir + "/" + cfg{"leftClip"}
+        fq2   = fqDir + "/" + cfg{"rightClip"}
+        fq3   = fqDir + "/" + cfg{"mergeClip"}
+        curr.add(fq1)
+        curr.add(fq2)
+        curr.add(fq3)
+      } else {
+        fq1   = fqDir + "/" + cfg{"leftClip"}
+        lst.add(fq1)
+      }
+    } else {
+      if( paired ) {
+        fq1   = cfg{"left"}
+        fq2   = cfg{"right"}
+        curr.add(fq1)
+        curr.add(fq2)
+      } else {
+        fq1   = cfg{"left"}
+        curr.add(fq1)
+      }
+    }
+
+    lst.add(curr.join(","))
+  }
+  return( lst )
+}
+
+/** 
+  * Returns a list of all the fastq input files for a given READGROUP 
+  * @input cfgmap config map for current readgroup 
+  * @return a list of all input fastq files
+  */
+string[] getFastqsRG( string{} cfgMap ) {
+  string[] curr
+
+  # Readgroup information
+  int offset   = cfgMap{"offset"}.parseInt()
+  bool clip    = cfgMap{"clip"}.parseBool()
+  bool paired  = cfgMap{"paired"}.parseBool()
+  string rgid  = cfgMap{"readgroup"}
+
+  # fqs 
+  string fq1
+  string fq2
+  string fq3
+
+  # Set IO files
+  if( clip ) {
+    # Outputs
+    string fqDir = cfgMap{"clipResultsDir"}.path()
+    if( paired ) {
+      fq1   = fqDir + "/" + cfgMap{"leftClip"}
+      fq2   = fqDir + "/" + cfgMap{"rightClip"}
+      fq3   = fqDir + "/" + cfgMap{"mergeClip"}
+      curr.add(fq1)
+      curr.add(fq2)
+      curr.add(fq3)
+    } else {
+      fq1   = fqDir + "/" + cfgMap{"leftClip"}
+      curr.add(fq1)
+    }
+  } else {
+    if( paired ) {
+      fq1   = cfgMap{"left"}
+      fq2   = cfgMap{"right"}
+      curr.add(fq1)
+      curr.add(fq2)
+    } else {
+      fq1   = cfgMap{"left"}
+      curr.add(fq1)
+    }
+  }
+
+  return( curr )
+}

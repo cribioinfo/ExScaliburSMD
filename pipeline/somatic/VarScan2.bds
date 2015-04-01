@@ -1,0 +1,357 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+include "../utils/VcfUtils.bds"
+
+/** 
+ * Runs VarScan2 and somatic filtration
+ * @input incfg the sample config map
+ * @input reference the reference fasta
+ * @input opt the option map
+ * @input aln the alignment ID
+ * @returns the task ID
+ */
+string VarScanAndFilter( string{} incfg, string[] callableBeds, string reference, string{} opt, string aln ) { 
+  # General information
+  string sample        = incfg{"sample"}
+  string normalID      = "$sample-NORMAL"
+  string tumorID       = "$sample-TUMOR"
+  bool isSplit         = incfg{"split"}.parseBool()
+
+  # Files
+  string projectDir    = incfg{"projectDir"}.path()
+  string resultsDir    = incfg{"resultsDir"}.path()
+  string logsDir       = incfg{"logsDir"}.path()
+
+  string finalDir      = projectDir.path() + "/results/$sample/03_SomaticMutations"
+  string smdDir        = projectDir.path() + "/results/$sample/03_SomaticMutations/varscan"
+  string smdLogsDir    = projectDir.path() + "/logs/03_SomaticMutations/varscan"
+
+  if( !smdLogsDir.exists() ) smdLogsDir.mkdir()
+  if( !smdDir.exists() ) smdDir.mkdir()
+ 
+  # Return tid
+  string tid
+ 
+  # Get the input files
+  string bamDir = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln"
+  string nBam   = bamDir + "/$normalID.$aln.recalibrated.bam"
+  string tBam   = bamDir + "/$tumorID.$aln.recalibrated.bam"
+  string finalVcf = finalDir + "/$sample.varscan.$aln.final.vcf"
+
+  # Run Split Jobs
+  if( finalVcf <- [nBam, tBam] ) {
+    info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=varscan | Run=true")
+    if( isSplit ) {
+      string tmpDir       = bamDir + "/splitFiles/bam"
+      int nSplits         = callableBeds.size()
+      string[] normalBams = loadSplitBamFiles( nBam, tmpDir, nSplits )
+      string[] tumorBams  = loadSplitBamFiles( tBam, tmpDir, nSplits )
+      string[] allBams
+      allBams.add(normalBams)
+      allBams.add(tumorBams)
+      #allBams.add([nBam, tBam])
+
+      if( finalVcf <- allBams ) { 
+        runVarScan2( normalBams, tumorBams, callableBeds, smdDir, smdLogsDir, normalID, \
+                     tumorID, sample, aln, opt, finalVcf, isSplit )
+      }
+    }
+    else {
+        runVarScan2( [nBam], [tBam], callableBeds, smdDir, smdLogsDir, normalID, \
+                     tumorID, sample, aln, opt, finalVcf, isSplit )
+    }
+  } else info("Sample=$sample | Task=Somatic Mutation Detection | Aln=$aln | Smd=varscan | Run=false")
+ 
+  return( tid )
+}
+
+/**
+ * Runs VarScan2 for split jobs
+ * @input normalBams input split normal bams
+ * @input tumorBams input split tumor bams
+ * @input intervals interval list
+ * @input odir output directory
+ * @input ldir logs directory
+ * @input normalID the normal sample ID
+ * @input tumorID the tumor sample ID
+ * @input sample the sample ID
+ * @input aln the alignment ID
+ * @input opt the option map
+ * @input finalVcf the final VCF file 
+ * @returns a task ID
+ */
+void runVarScan2( string[] normalBams, string[] tumorBams, string[] intervals, \
+                  string odir, string ldir, string normalID, string tumorID, \
+                  string sample, string aln, string{} opt, string finalVcf, bool isSplit ) {
+  # Run options 
+  string[] modNames  = ["java_modname", "samtools_modname", "python_modname", "varscan_modname"]
+  string mod         = "# Running VarScan2" 
+  mod                = getModuleString( modNames, mod ) 
+  string varscanExe  = opt{"varscan_exe"}
+  string pythonExe   = opt{"python_exe"}
+  string samtoolsExe = opt{"samtools_exe"}
+  string javaMem     = opt{"varscan_mem"}
+  int runMem         = ( opt{"varscan_mem"}.parseInt() + 1 ) * G
+  string fltExe      = opt{"somatic_filter_exe"}
+  string java        = "$baseJava -Xmx" + javaMem + "G -jar" 
+
+  # VarScan options
+  string reference = opt{"reference"}
+  int minMapQ      = opt{"min_map_q"}.parseInt()
+
+  string minHet, minHom, pVal, somPval, strandFilt 
+  if( opt.hasKey("varscan_min_freq_het") ) minHet = " --min-var-freq " + opt{"varscan_min_freq_het"}
+  if( opt.hasKey("varscan_min_freq_hom") ) minHom = " --min-freq-for-hom " + opt{"varscan_min_freq_hom"}
+  if( opt.hasKey("varscan_p_value_het") ) pVal = " --p-value " + opt{"varscan_p_value_het"}
+  if( opt.hasKey("varscan_p_value_somatic") ) somPval = " --somatic-p-value " + opt{"varscan_p_value_somatic"}
+  if( opt{"varscan_strand_filter"}.parseBool() ) strandFilt = " --strand-filter" 
+
+  # Filter options
+  string fltMinNormalDepth, fltMinTumorDepth, fltMaxNormalFreq, fltMinTumorFreq, fltMinPval 
+  if( opt.hasKey("filter_min_normal_depth") ) fltMinNormalDepth = " --min-normal-depth " + \
+                                                                  opt{"filter_min_normal_depth"}
+  if( opt.hasKey("filter_min_tumor_depth") ) fltMinTumorDepth = " --min-tumor-depth " + opt{"filter_min_tumor_depth"}
+  if( opt.hasKey("filter_max_alt_freq_normal") ) fltMaxNormalFreq = " --max-alt-freq-normal " + \
+                                                                  opt{"filter_max_alt_freq_normal"}
+  if( opt.hasKey("filter_min_alt_freq_tumor") ) fltMinTumorFreq = " --min-alt-freq-tumor " + \
+                                                                  opt{"filter_min_alt_freq_tumor"}
+  if( opt.hasKey("filter_pval_cutoff") ) fltMinPval = " --pval-cutoff " + opt{"filter_pval_cutoff"}
+
+  # Task list
+  string[] fltVcfs
+  string[] tasks
+
+  # Odir 
+  string opath = odir + "/$aln"
+  if( !opath.exists() ) opath.mkdir() 
+
+  # ---- SPLIT JOBS ---- #
+  if( isSplit ) {
+    for( int i=0; i<intervals.size(); i++ ) { 
+      # Inputs
+      string nbam     = normalBams[i]
+      string tbam     = tumorBams[i]
+      string interval = intervals[i]
+
+      # Outputs
+      string oPfx     = opath + "/$sample.$aln.varscan.$i"
+      string outSnp   = opath + "/$sample.$aln.varscan.$i.snp"
+      string outIndel = opath + "/$sample.$aln.varscan.$i.indel"
+      string fltVcf   = opath + "/$sample.$aln.varscan.$i.flt.vcf"
+      string olog     = ldir.path() + "/$sample.$aln.varscan.$i.logs"
+      string mnlog    = ldir.path() + "/$normalID.$aln.varscan.$i.mpile.logs"
+      string mtlog    = ldir.path() + "/$tumorID.$aln.varscan.$i.mpile.logs"
+
+      # Mpileup
+      string nMpile   = '$samtoolsExe mpileup -l $interval -q $minMapQ -f $reference $nbam 2> $mnlog'
+      string tMpile   = '$samtoolsExe mpileup -l $interval -q $minMapQ -f $reference $tbam 2> $mtlog'
+
+      # Run
+      if( [outSnp, outIndel] <- [nbam, tbam] ) {
+        tid := task([outSnp, outIndel] <- [nbam, tbam], cpus := 1, mem := runMem, \
+                    taskName := "varscan.$sample.$aln.$i" ) {
+          sys $mod
+          sys /bin/bash -c "$java $varscanExe somatic <($nMpile) <($tMpile) $oPfx \
+              --output-snp $outSnp --output-indel $outIndel \
+              $minHet$minHom$pVal$somPval$strandFilt > $olog 2>&1"
+          sys sleep $safeSleep
+        }
+        tasks.add(tid)
+      }
+
+      if( fltVcf <- [outSnp, outIndel] ) {
+        tid := task(fltVcf <- [outSnp, outIndel], cpus := 1, mem := runMem, \
+                    taskName := "varscan-filter.$sample.$aln.$i") {
+          sys $pythonExe $fltExe \
+              varscan$fltMinNormalDepth$fltMinTumorDepth$fltMaxNormalFreq$fltMinTumorFreq$fltMinPval \
+              --tumor-name $tumorID --normal-name $normalID --reference $reference $outSnp $outIndel \
+              $fltVcf >> $olog 2>&1
+          sys sleep $safeSleep
+        }
+        tasks.add(tid)
+      }
+
+      fltVcfs.add(fltVcf)
+    }
+
+    if( system == "local" ) wait tasks
+    #fltVcfs.rmOnExit()
+
+    # Merge
+    mergeVcfs( fltVcfs, finalVcf, ldir, sample, aln, "varscan", opt )
+  }
+
+  # ---- NOT SPLIT ---- #
+  else {
+    # Format VCF
+    string[] vmodList = ["java_modname", "picard_modname"]
+    string vmod       = "# Running format VCF"
+    vmod              = getModuleString( vmodList, vmod )
+    string picardExe  = opt{"picard_exe"}
+    string vcfJavaMem = opt{"picard_vcf_mem"}
+    string vcfMem     = (opt{"picard_vcf_mem"}.parseInt() + 1) * G
+    string vcfJava    = "$baseJava -Xmx" + vcfJavaMem + "G -jar"
+    
+    # Inputs
+    string nbam       = normalBams[0]
+    string tbam       = tumorBams[0]
+    string interval   = intervals[0]
+
+    # Outputs
+    string oPfx       = opath + "/$sample.$aln.varscan"
+    string outSnp     = opath + "/$sample.$aln.varscan.snp"
+    string outIndel   = opath + "/$sample.$aln.varscan.indel"
+    string fltVcf     = opath + "/$sample.$aln.varscan.flt.vcf"
+    string olog       = ldir.path() + "/$sample.$aln.varscan.logs"
+    string mnlog      = ldir.path() + "/$normalID.$aln.varscan.mpile.logs"
+    string mtlog      = ldir.path() + "/$tumorID.$aln.varscan.mpile.logs"
+
+    # Mpileup
+    string nMpile     = '$samtoolsExe mpileup -l $interval -q $minMapQ -f $reference $nbam 2> $mnlog'
+    string tMpile     = '$samtoolsExe mpileup -l $interval -q $minMapQ -f $reference $tbam 2> $mtlog'
+
+    # Run
+    dep([outSnp, outIndel] <- [nbam, tbam], cpus := 1, mem := runMem, taskName := "varscan.$sample.$aln" ) {
+      sys $mod
+      sys /bin/bash -c "$java $varscanExe somatic <($nMpile) <($tMpile) $oPfx \
+          --output-snp $outSnp --output-indel $outIndel \
+          $minHet$minHom$pVal$somPval$strandFilt > $olog 2>&1"
+      sys sleep $safeSleep
+    }
+
+    dep(fltVcf <- [outSnp, outIndel], cpus := 1, mem := runMem, taskName := "varscan-filter.$sample.$aln") {
+      sys $pythonExe $fltExe \
+          varscan$fltMinNormalDepth$fltMinTumorDepth$fltMaxNormalFreq$fltMinTumorFreq$fltMinPval \
+          --tumor-name $tumorID --normal-name $normalID --reference $reference $outSnp $outIndel \
+          $fltVcf >> $olog 2>&1
+      sys sleep $safeSleep
+    }
+
+    dep( finalVcf <- fltVcf, cpus := 1, mem := vcfMem, taskName := "varscan-format.$sample.$aln" ) {
+      sys $vmod
+      sys $vcfJava $picardExe/VcfFormatConverter.jar INPUT=$fltVcf OUTPUT=$finalVcf \
+          REQUIRE_INDEX=false >> $olog 2>&1
+      sys sleep $safeSleep
+    }
+
+    goal( finalVcf )
+  }
+}
+
+/**
+ * Runs VarScan2 for split jobs
+ * @input normalBams input split normal bams
+ * @input tumorBams input split tumor bams
+ * @input intervals interval list
+ * @input odir output directory
+ * @input ldir logs directory
+ * @input normalID the normal sample ID
+ * @input tumorID the tumor sample ID
+ * @input sample the sample ID
+ * @input aln the alignment ID
+ * @input opt the option map
+ * @input finalVcf the final VCF file 
+ * @returns a task ID
+void runVarScan2( string nbam, string tbam, string intervals, \
+                  string odir, string ldir, string normalID, string tumorID, \
+                  string sample, string aln, string{} opt, string finalVcf ) {
+  # Run options 
+  string[] modNames  = ["java_modname", "varscan_modname", "samtools_modname", "python_modname"]
+  string mod         = "# Running VarScan2" 
+  mod                = getModuleString( modNames, mod )
+  string varscanExe  = opt{"varscan_exe"}
+  string pythonExe   = opt{"python_exe"}
+  string samtoolsExe = opt{"samtools_exe"}
+  string javaMem     = opt{"varscan_mem"}
+  int runMem         = ( opt{"varscan_mem"}.parseInt() + 1 ) * G
+  string fltExe      = opt{"somatic_filter_exe"}
+  string java        = "$baseJava -Xmx" + javaMem + "G -jar" 
+
+  # VarScan options
+  string reference = opt{"reference"}
+  int minMapQ      = opt{"min_map_q"}.parseInt()
+
+  string minHet, minHom, pVal, somPval, strandFilt 
+  if( opt.hasKey("varscan_min_freq_het") ) minHet = " --min-var-freq " + opt{"varscan_min_freq_het"}
+  if( opt.hasKey("varscan_min_freq_hom") ) minHom = " --min-freq-for-hom " + opt{"varscan_min_freq_hom"}
+  if( opt.hasKey("varscan_p_value_het") ) pVal = " --p-value " + opt{"varscan_p_value_het"}
+  if( opt.hasKey("varscan_p_value_somatic") ) somPval = " --somatic-p-value " + opt{"varscan_p_value_somatic"}
+  if( opt{"varscan_strand_filter"}.parseBool() ) strandFilt = " --strand-filter" 
+
+  # Filter options
+  string fltMinNormalDepth, fltMinTumorDepth, fltMaxNormalFreq, fltMinTumorFreq, fltMinPval 
+  if( opt.hasKey("filter_min_normal_depth") ) fltMinNormalDepth = " --min-normal-depth " + \
+                                                                  opt{"filter_min_normal_depth"}
+  if( opt.hasKey("filter_min_tumor_depth") ) fltMinTumorDepth = " --min-tumor-depth " + opt{"filter_min_tumor_depth"}
+  if( opt.hasKey("filter_max_alt_freq_normal") ) fltMaxNormalFreq = " --max-alt-freq-normal " + \
+                                                                  opt{"filter_max_alt_freq_normal"}
+  if( opt.hasKey("filter_min_alt_freq_tumor") ) fltMinTumorFreq = " --min-alt-freq-tumor " + \
+                                                                  opt{"filter_min_alt_freq_tumor"}
+  if( opt.hasKey("filter_pval_cutoff") ) fltMinPval = " --pval-cutoff " + opt{"filter_pval_cutoff"}
+
+  # Format VCF
+  string[] vmodList = ["java_modname", "picard_modname"]
+  string vmod       = "# Running format VCF"
+  vmod              = getModuleString( vmodList, vmod )
+  string picardExe  = opt{"picard_exe"}
+  string vcfJavaMem = opt{"picard_vcf_mem"}
+  string vcfMem     = (opt{"picard_vcf_mem"}.parseInt() + 1) * G
+  string vcfJava    = "$baseJava -Xmx" + vcfJavaMem + "G -jar"
+
+  # Task list
+  string[] fltVcfs
+  string[] tasks
+
+  # Loop over each interval and run 
+  string opath = odir + "/$aln"
+  if( !opath.exists() ) opath.mkdir() 
+
+  # Outputs
+  string oPfx     = opath + "/$sample.$aln.varscan"
+  string outSnp   = opath + "/$sample.$aln.varscan.snp"
+  string outIndel = opath + "/$sample.$aln.varscan.indel"
+  string fltVcf   = opath + "/$sample.$aln.varscan.flt.vcf"
+  string olog     = ldir.path() + "/$sample.$aln.varscan.logs"
+  string mnlog    = ldir.path() + "/$normalID.$aln.varscan.mpile.logs"
+  string mtlog    = ldir.path() + "/$tumorID.$aln.varscan.mpile.logs"
+
+  # Mpileup
+  string nMpile   = '$samtoolsExe mpileup -l $intervals -q $minMapQ -f $reference $nbam 2> $mnlog'
+  string tMpile   = '$samtoolsExe mpileup -l $intervals -q $minMapQ -f $reference $tbam 2> $mtlog'
+
+  # Run
+  dep([outSnp, outIndel] <- [nbam, tbam], cpus := 1, mem := runMem ) {
+    sys $mod
+    sys /bin/bash -c "$java $varscanExe somatic <($nMpile) <($tMpile) $oPfx \
+        --output-snp $outSnp --output-indel $outIndel \
+        $minHet$minHom$pVal$somPval$strandFilt > $olog 2>&1"
+  }
+
+  dep(fltVcf <- [outSnp, outIndel], cpus := 1, mem := runMem) {
+    sys $pythonExe $fltExe \
+        varscan$fltMinNormalDepth$fltMinTumorDepth$fltMaxNormalFreq$fltMinTumorFreq$fltMinPval \
+        --tumor-name $tumorID --normal-name $normalID --reference $reference $outSnp $outIndel \
+        $fltVcf >> $olog 2>&1
+  }
+
+  dep( finalVcf <- fltVcf, cpus := 1, mem := vcfMem ) {
+    sys $vmod
+    sys $vcfJava $picardExe/VcfFormatConverter.jar INPUT=$fltVcf OUTPUT=$finalVcf \
+        REQUIRE_INDEX=false >> $olog 2>&1
+  }
+
+  goal( finalVcf )
+}*/

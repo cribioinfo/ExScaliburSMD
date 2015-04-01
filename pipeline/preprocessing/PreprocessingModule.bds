@@ -1,0 +1,136 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+include "FastQC.bds"
+include "Clipping.bds"
+
+/**
+ * Runs the preprocessing module including FastQC and adapter trimming.
+ * @input sampleConfigList the list of all readgroup configs for the current sample
+ * @input sample the sample id
+ * @input projectDir the path to the project directory
+ * @input resultsDir the path to the results directory
+ * @input logsDir the path to the logs directory
+ * @input doFastqc should we run FastQC
+ * @input doClipping should we run adapter trimming
+ * @input opt the options map
+ * @returns nothing 
+ */
+string[] RunPreprocessing( string[] sampleConfigList, string sample, string projectDir, \
+                           string resultsDir, string logsDir, bool doFastqc, bool doClipping, \
+                           string{} opt ) {
+  # We first loop through all the preprocessing which includes 
+  # fastqc and clipping
+  string[] pids
+  for( string c : sampleConfigList ) {
+    pid := par RunParallelPreprocessing( c, sample, projectDir, resultsDir, logsDir, \
+                                         doFastqc, doClipping, opt )
+    pids.add(pid)
+  }
+  return( pids )
+}
+
+
+void RunParallelPreprocessing( string c, string sample, string projectDir, string resultsDir, \
+                               string logsDir, bool doFastqc, bool doClipping, string{} opt ) {
+
+  # Check if it can be read
+  if( !c.canRead() ) error "Unable to read $c"
+
+  # Readgroup config map 
+  string{} rgCfg = config(c)
+
+  # General RG Options
+  bool clip   = rgCfg{"clip"}.parseBool()
+  bool paired = rgCfg{"paired"}.parseBool()
+  string rg   = rgCfg{"readgroup"}
+  int offset  = rgCfg{"offset"}.parseInt()
+
+  # Readgroup Files 
+  string fq1  = rgCfg{"left"}
+  string fq2, fq3
+  string fastqcDir   = rgCfg{"fastqcResultsDir"}.path()
+  string fastqcData1 = fastqcDir + "/" + rgCfg{"leftFastqcResultsDir"} + "/fastqc_data.txt"
+  string fastqcData2
+  string leftClip, rightClip, mergeClip
+
+  # Deps
+  string[] inDeps = [fq1]
+  string[] fqOutDeps = [fastqcData1] 
+  string[] clipOutDeps
+
+  # Paired
+  if( paired ) {
+    fq2         = rgCfg{"right"}
+    fastqcData2 = fastqcDir + "/" + rgCfg{"rightFastqcResultsDir"} + "/fastqc_data.txt"
+    inDeps.add(fq2)
+    fqOutDeps.add(fastqcData2)
+  }
+
+  #-- FastQC
+  if( doFastqc ) {
+    if( fqOutDeps <- inDeps ) {
+      info("Sample=$sample | Readgroup=$rg | Task=Preprocessing-FastQC | Run=true") 
+      string fastqcLogsDir = logsDir + "/00_Preprocessing/fastqc"
+      if( !fastqcDir.exists() ) fastqcDir.mkdir()
+      if( !fastqcLogsDir.exists() ) fastqcLogsDir.mkdir()
+      string fastqcLogs = "$fastqcLogsDir/$rg.fastqc.logs"
+
+      # Run
+      FastQC( fastqcLogsDir, fastqcDir, fq1, fq2, fastqcData1, fastqcData2, rg, paired, opt )
+    } else {
+      info("Sample=$sample | Readgroup=$rg | Task=Preprocessing-FastQC | Run=false") 
+    }
+  } else {
+    info("Sample=$sample | Readgroup=$rg | Task=Preprocessing-FastQC | Run=false") 
+  }
+
+  string clipTask
+
+  #-- Clipping
+  if( doClipping && clip ) {
+    # Set directories
+    string clipLogsDir    = logsDir + "/00_Preprocessing/clipping"
+    string clipLogs       = clipLogsDir + "/$rg.clip.logs"
+    string clipResultsDir = rgCfg{"clipResultsDir"}.path()
+    if( !clipLogsDir.exists() ) clipLogsDir.mkdir()
+    if( !clipResultsDir.exists() ) clipResultsDir.mkdir()
+
+    # Paired-end run SeqPrep
+    if( paired ) {
+      leftClip  = clipResultsDir + "/" + rgCfg{"leftClip"}
+      rightClip = clipResultsDir + "/" + rgCfg{"rightClip"}
+      mergeClip = clipResultsDir + "/" + rgCfg{"mergeClip"}
+      clipOutDeps.add([leftClip, rightClip, mergeClip])
+
+      # Check deps
+      if( clipOutDeps <- inDeps ) {
+        info("Sample=$sample | Readgroup=$rg | Task=Preprocessing-SeqPrep | Run=true") 
+        clipTask = SeqPrep( clipLogsDir, rg, fq1, fq2, leftClip, \
+                            rightClip, mergeClip, offset, opt )
+      } else info("Sample=$sample | Readgroup=$rg | Task=Preprocessing-SeqPrep | Run=false") 
+    } 
+
+    # Single-end run Cutadapt
+    else {
+      string leftClip  = clipResultsDir + "/" + rgCfg{"leftClip"}
+      # Check deps
+      if( leftClip <- inDeps ) {
+        info("Sample=$sample | Readgroup=$rg | Task=Preprocessing-Cutadapt | Run=true") 
+        clipTask = Cutadapt( clipLogsDir, rg, fq1, leftClip, offset, opt )
+      } else info("Sample=$sample | Readgroup=$rg | Task=Preprocessing-Cutadapt | Run=false") 
+    }
+  } else info("Sample=$sample | Readgroup=$rg | Task=Preprocessing-Clipping | Run=false") 
+}

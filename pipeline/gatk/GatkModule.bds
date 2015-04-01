@@ -1,0 +1,104 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+include "IndelRealignment.bds"
+include "BaseRecalibration.bds"
+include "CallableRegions.bds"
+
+/**
+ * Runs InDel realignment and base quality recalibration steps.
+ * @input cfg the current sample config map
+ * @input aln the current alignment ID
+ * @input opt the option map
+ * @input split is this a split job?
+ * @returns the list of callable region beds 
+ */
+string[] RunGatkProcessing( string{} cfg, string aln, string{} opt, bool split ) { 
+  # Run InDel realignment
+  string[] realignedBam    = runIndelRealign( cfg, opt, aln )
+
+  # Run base quality recalibration
+  string[] recalibratedBam = runBaseRecalibration( cfg, realignedBam, opt, aln )
+
+  # Get the callable loci files
+  string callableBed      = runCallableLoci( cfg, recalibratedBam, opt, aln )
+
+  # If this is a split job, split the bam files
+  string[] splitCallableRegions
+
+  if( split ) {
+    string[] splitCallableRegions = runSplitRegions( callableBed, aln, cfg, opt )
+    string[] tids                 = runSplitBams( cfg, recalibratedBam, splitCallableRegions, aln, opt )
+    return( splitCallableRegions )
+  } else {
+    return( [callableBed] )
+  }
+}
+
+/**
+ * Splits a bed file into Nmax groups of relatively even size. NOTE: may return
+ * less than Nmax bed files. You can find the total number of splits in the configuration
+ * file output by the splitting script.
+ * @input bed the input bed file to split
+ * @input aln the aligner id
+ * @input cfg the sample's configuration map
+ * @input opt the option map
+ * @return a list of the split bed files
+ */
+string[] runSplitRegions( string bed, string aln, string{} cfg, string{} opt ) {
+  # General
+  string sample        = cfg{"sample"}
+  string normalID      = "$sample-NORMAL"
+  string tumorID       = "$sample-TUMOR"
+
+  # Files
+  string projectDir    = cfg{"projectDir"}.path()
+  string resultsDir    = cfg{"resultsDir"}.path()
+  string logsDir       = cfg{"logsDir"}.path()
+  string runDir        = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln"
+  string splitCfg      = "$runDir/$sample.$aln.split.cfg"
+  string splitDir      = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln/splitFiles/bed"
+  string splitPfx      = "$splitDir/$sample.$aln"
+  string runLogsDir    = projectDir.path() + "/logs/02_GatkProcessing/$aln/callableLoci"
+  if( !splitDir.exists() ) splitDir.mkdir()
+
+  # Run parameters
+  string splitExe = opt{"split_bed_exe"}
+  int maxSplit    = cfg{"max_split"}.parseInt()
+
+  # Need to remove old bed files if we are rerunning
+  string tid
+  if( splitCfg <- bed ) {
+    splitDir.dir("*.bed").rm()
+
+    tid = task( splitCfg <- bed, cpus := 1, taskName := "callable-split.$sample.$aln" ) {
+      sys $splitExe $bed $splitCfg $maxSplit $splitPfx 
+      sys sleep $safeSleep
+    }
+  }
+
+  # Wait for it to finish then load the config and add the split beds to a list
+  wait tid
+  string[] retList
+  string{} splitResMap = config(splitCfg)
+  int nSplits          = splitResMap{"totalSplits"}.parseInt()
+  for( int i = 0 ; i < nSplits ; i++ ) {
+    retList.add("$splitPfx.$i.callable.bed")
+  }
+
+  # Mark bed files for remonal on exit
+  #retList.rmOnExit()
+  return( retList )
+} 

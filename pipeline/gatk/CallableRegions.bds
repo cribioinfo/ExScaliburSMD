@@ -1,0 +1,152 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+/**
+ * runs CallableLoci
+ *
+ * @input incfg the sample config map
+ * @input bams the input bam list 
+ * @input opt the option map
+ * @input aln the alignment ID
+ * @returns the callable bed file 
+ */
+string runCallableLoci( string{} incfg, string[] bams, string{} opt, string aln ) {
+  # General information
+  string reference     = opt{"reference"}
+  string[] knowns      = [opt{"knowndb"}, opt{"known_indel"}]
+  string sample        = incfg{"sample"}
+  string normalID      = "$sample-NORMAL"
+  string tumorID       = "$sample-TUMOR"
+  
+  # Files
+  string referenceName = opt{"reference_name"}
+  string projectDir    = incfg{"projectDir"}.path()
+  string resultsDir    = incfg{"resultsDir"}.path()
+  string logsDir       = incfg{"logsDir"}.path()
+  string runDir        = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln"
+  string splitDir      = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln/splitFiles"
+  string runLogsDir    = projectDir.path() + "/logs/02_GatkProcessing/$aln/callableLoci"
+
+  if( !runLogsDir.exists() ) runLogsDir.mkdir()
+  if( !splitDir.exists() ) splitDir.mkdir()
+
+  #-- NORMAL 
+  string normalBam             = bams[0]
+  string normalCallableLogs    = runLogsDir + "/$normalID.$aln.CallableLoci.logs"
+  string normalCallableSummary = runDir + "/$normalID.$aln.callable.summary"
+  string normalCallableBed     = runDir + "/$normalID.$aln.callable.bed"
+ 
+  # Get callable
+  if( normalCallableBed <- normalBam ) {
+    info("Sample=$sample | Phenotype=NORMAL | Task=Callable Loci | Aln=$aln | Run=true")
+    # Get callable loci
+    getCallableLoci( normalBam, normalCallableSummary, normalCallableBed, normalCallableLogs, \
+                     normalID, aln, opt ) 
+  } else info("Sample=$sample | Phenotype=NORMAL | Task=Callable Loci | Aln=$aln | Run=false")
+
+  #-- TUMOR 
+  string tumorBam   = bams[1]
+  string tumorCallableLogs    = runLogsDir + "/$tumorID.$aln.CallableLoci.logs"
+  string tumorCallableSummary = runDir + "/$tumorID.$aln.callable.summary"
+  string tumorCallableBed     = runDir + "/$tumorID.$aln.callable.bed"
+
+  # Get callable
+  if( [tumorCallableSummary, tumorCallableBed] <- tumorBam ) {
+    info("Sample=$sample | Phenotype=TUMOR | Task=Callable Loci | Aln=$aln | Run=true")
+    # Run callable loci
+    getCallableLoci( tumorBam, tumorCallableSummary, tumorCallableBed, tumorCallableLogs, \
+                     tumorID, aln, opt ) 
+  } else info("Sample=$sample | Phenotype=TUMOR | Task=Callable Loci | Aln=$aln | Run=false")
+
+  # Get the merged callable bed file
+  string mergedBed = runDir + "/$sample.$aln.callable.merged.bed" 
+  string mergedLogs = runLogsDir + "/$sample.$aln.MergeCallable.logs"
+  getCallableMerged([normalCallableBed, tumorCallableBed], mergedBed, mergedLogs, sample, aln, opt ) 
+
+  return( mergedBed )
+}
+
+/**
+ * Runs CallableLoci
+ * @input bam the input bam file
+ * @input summary the output summary file
+ * @input obed the output bed file of callable loci
+ * @input chrmFile the file containing the chromosomes with callable loci for this bam
+ * @input logs the log file
+ * @input obam the bam reduced to only callable regions
+ * @input opt the options map
+ * @return nothing
+ */
+void getCallableLoci( string bam, string summary, string obed, \
+                      string logs, string sampID, string aln, string{} opt ) {
+
+  # Files
+  string rawBed      = obed.swapExt("bed", "raw.bed")
+
+  # Run parameters
+  string gatkExe     = opt{"gatk_exe"}
+  string gatkJavaMem = opt{"gatk_mem"}
+  int gatkMem        = (opt{"gatk_mem"}.parseInt() + 1) * G
+  string reference   = opt{"reference"}
+  string java        = "$baseJava -Xmx" + gatkJavaMem + "G -jar" 
+  string mod         = "# CallableLoci on $bam"
+  string[] modNames  = ["java_modname", "gatk_modname", "samtools_modname"]
+  mod                = getModuleString( modNames, mod )
+  string targets
+  if( opt.hasKey("target_bed") ) targets = " -L " + opt{"target_bed"}
+
+  # Run
+  task( rawBed <- bam, cpus := 1, mem := gatkMem, taskName := "callable.$sampID.$aln" ) {
+    sys $mod
+    sys $java $gatkExe -T CallableLoci -I $bam -R $reference -summary $summary -o $rawBed$targets > $logs 2>&1
+    sys sleep $safeSleep
+  }
+
+  task( obed <- rawBed, cpus := 1, taskName := "callable-grep.$sampID.$aln" ) {
+    sys cat $rawBed | grep CALLABLE | cut -f1-3 > $obed
+    sys sleep $safeSleep
+  }
+
+}
+
+void getCallableMerged(string[] inBeds, string mergeBed, string logs, \
+                       string sample, string aln, string{} opt ) {
+  # Run parameters
+  string bedExe     = opt{"bedtools_exe"}
+  string fixExe     = opt{"fix_intersect_exe"}
+  string mod        = "# Merging callables $inBeds"
+  string[] modNames = ["bedtools_modname"]
+  mod               = getModuleString( modNames, mod )
+
+  # Files
+  string intermediate   = mergeBed.swapExt("merged.bed", "intersect.bed")
+  string inputParameter = "-a " + inBeds[0] + " -b " + inBeds[1] 
+
+  if( mergeBed <- inBeds ) {
+    task( intermediate <- inBeds, cpus := 1, taskName := "callable-intersect.$sample.$aln" ) {
+      sys $mod
+      sys $bedExe intersect $inputParameter -wa -wb 2> $logs | $fixExe - \
+          | sort -k1,1 -k2,2n > $intermediate
+      sys sleep $safeSleep
+    }
+
+    task( mergeBed <- intermediate, cpus := 1, taskName := "callable-merge.$sample.$aln" ) {
+      sys $mod
+      sys $bedExe merge -i $intermediate > $mergeBed
+      sys sleep $safeSleep
+    }
+  }
+}

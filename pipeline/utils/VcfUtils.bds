@@ -1,0 +1,54 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+/**
+ * Merges vcf files
+ * @input inVcfs input vcf files to merge
+ * @input ovcf output merged VCF
+ * @input ldir logs directory
+ * @input sample sample ID
+ * @input aln alignment ID
+ * @input smd somatic tool ID 
+ * @input opt option map
+ * @returns a task ID
+ */
+string mergeVcfs( string[] inVcfs, string ovcf, string ldir, string sample, \
+                  string aln, string smd, string{} opt ) {
+  # Run settings
+  string mod         = "# Merging Vcfs to $ovcf"
+  string[] modNames  = ["java_modname", "gatk_modname"]
+  mod                = getModuleString( modNames, mod )
+  string gatkJavaMem = opt{"gatk_mem"}
+  int jobMem         = ( opt{"gatk_mem"}.parseInt() + 1 ) * G
+  string reference   = opt{"reference"}
+  string gatkExe     = opt{"gatk_exe"}
+  string java        = "java -Xmx" + gatkJavaMem + "G -jar "
+  string vcfString   = inVcfs.join(" --variant ")
+  string olog        = ldir.path() + "/$sample.$aln.$smd.combine.logs"
+
+  # Run
+  string tid
+  if( ovcf <- inVcfs ) {
+    tid = task( ovcf <- inVcfs, cpus := 1, mem := jobMem, taskName := "$smd-merge.$sample.$aln" ) {
+      sys $mod
+      sys $java $gatkExe -T CombineVariants -R $reference --assumeIdenticalSamples --variant $vcfString \
+          --filteredrecordsmergetype KEEP_UNCONDITIONAL -o $ovcf > $olog 2>&1
+      sys sleep $safeSleep
+    }
+  }
+
+  return( tid )
+}

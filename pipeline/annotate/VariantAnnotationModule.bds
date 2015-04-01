@@ -1,0 +1,78 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+void RunVariantAnnotation( string{} cfg, string resultsDir, string aln, \
+                             string smd, string{} opt ) { 
+  # General
+  string sample     = cfg{"sample"}
+
+  # Files
+  string inDir      = resultsDir.path() + "/03_SomaticMutations"
+  string outDir     = resultsDir.path() + "/04_VariantAnnotation"
+  string tmpDir     = resultsDir.path() + "/04_VariantAnnotation/tmp"
+  string logsDir    = cfg{"logsDir"}.path() + "/04_VariantAnnotation"
+  if( !tmpDir.exists() ) tmpDir.mkdir()
+  if( !logsDir.exists() ) logsDir.mkdir()
+
+  # Get the input VCF file 
+  string finalVcf   = inDir + "/$sample.$smd.$aln.final.vcf"
+ 
+  # Annovar settings
+  string refname    = opt{"reference_name"}
+  string protocols  = opt{"annovar_protocols"}
+  string operations = opt{"annovar_operations"}
+  string dbname     = opt{"annovar_db_name"}
+  string exeConvert = opt{"annovar_convert"}
+  string exeTable   = opt{"annovar_table"}
+  string dbPath     = opt{"annovar_db_path"}.path()
+
+  # Get the outputs 
+  string convert        = tmpDir + "/$sample.$smd.$aln.vcf.annovar"
+  string summary        = "$convert.anno" 
+  string tmpMultiAnno   = "$summary.$refname" + "_multianno.txt" 
+  string finalMultiAnno = outDir + "/" + tmpMultiAnno.baseName()
+
+  # Logs
+  string convertLogs  = logsDir + "/$sample.$smd.$aln.convert.logs"
+  string tableLogs    = logsDir + "/$sample.$smd.$aln.table.logs"
+ 
+  # Run settings
+  string[] modNames = ["annovar_modname"]
+  string mod        = "# Annotating $finalVcf"
+  mod               = getModuleString( modNames, mod )
+  int runMem        = opt{"annovar_mem"}.parseInt() * G
+
+  # Dependencies
+  #-- Convert VCF
+  if( finalMultiAnno <- finalVcf ) {
+    info("Sample=$sample | Task=Variant Annotation | Aln=$aln | Smd=$smd | Run=true")
+    task( convert <- finalVcf, mem := runMem, cpus := 1, allowEmpty := true, \
+          taskName := "annovar-convert.$sample.$aln.$smd" ) {
+      sys $mod
+      sys $exeConvert --format vcf4old --includeinfo $finalVcf > $convert 2> $convertLogs
+      sys sleep $safeSleep
+    }
+
+    #-- Annotate
+    task( finalMultiAnno <- convert, mem := runMem, cpus := 1, taskName := "annovar-table.$sample.$aln.$smd" ) {
+      sys $mod
+      sys $exeTable --otherinfo --buildver $refname --protocol $protocols -operation $operations \
+          --outfile $summary $convert $dbPath 2> $tableLogs
+      sys mv $tmpMultiAnno $finalMultiAnno
+      sys sleep $safeSleep
+    }
+  } else info("Sample=$sample | Task=Variant Annotation | Aln=$aln | Smd=$smd | Run=false")
+}

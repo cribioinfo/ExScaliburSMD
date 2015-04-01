@@ -1,0 +1,104 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+/**
+ * Runs SeqPrep on paired-end reads.
+ * @input logsDir the logs directory path
+ * @input rg the readgroup id
+ * @input fq1 the left mate fastq
+ * @input fq2 the right mate fastq
+ * @input left the clipped left mate fastq 
+ * @input right the clipped right mate fastq
+ * @input merged the merged overlapping mate fastq
+ * @input offset the Phred-offset
+ * @input opt the option map
+ * @returns task ID
+ */
+string SeqPrep( string logsDir, string rg, string fq1, string fq2, string left, \
+                string right, string merged, int offset, string{} opt ) {
+
+  # Modules
+  string[] modNames = ["seqprep_modname"] 
+
+  # Files
+  string logs = "$logsDir/$rg.clip.logs"
+
+  # Run parameters
+  string mod = "# SeqPrep on $rg"
+  int runMem = opt{"seqprep_mem"}.parseInt() * G
+  string exe = opt{"seqprep_exe"}
+  mod        = getModuleString( modNames, mod )
+
+  # SeqPrep options
+  string optMinLen, fAdapter, rAdapter, offsetString
+  if( opt.hasKey("min_clip_length") ) optMinLen = " -L " + opt{"min_clip_length"}
+  if( opt.hasKey("seqprep_forward_adapter") ) fAdapter = " -A " + opt{"seqprep_forward_adapter"}
+  if( opt.hasKey("seqprep_reverse_adapter") ) rAdapter = " -B " + opt{"seqprep_reverse_adapter"}
+  if( offset != 33 ) offsetString = " -6" 
+
+  # Run
+  tid := task( [left, right, merged] <- [fq1, fq2], cpus := 1, mem := runMem, taskName := "clip.$rg" ) {
+    sys $mod
+    sys $exe -f $fq1 -r $fq2 -1 $left -2 $right \
+        -s $merged$optMinLen$fAdapter$rAdapter$offsetString > $logs 2>&1
+    sys sleep $safeSleep
+  }
+
+  # Return taskid
+  return( tid )
+}
+
+/**
+ * Runs Cutadapt on single-end reads.
+ * @input logDir the logs directory path
+ * @input rg the readgroup id
+ * @input fq1 the left mate fastq
+ * @input left the clipped left mate fastq 
+ * @input offset the Phred-offset
+ * @input opt the option map
+ * @returns task ID
+ */
+string Cutadapt( string logsDir, string rg, string fq1, string left, int offset, string{} opt ) {
+  # Modules
+  string[] modNames = ["cutadapt_modname"]
+
+  # Files
+  string logs = "$logsDir/$rg.clip.logs"
+
+  # Options
+  string adapter1 = opt{"cutadapt_adapter1"}
+  string optMinLen
+  string adapter2
+  string offsetString
+  if( opt.hasKey("min_clip_length") ) optMinLen = " -m " + opt{"min_clip_length"}
+  if( opt.hasKey("cutadapt_adapter2") ) adapter2 = " -b " + opt{"cutadapt_adapter2"}
+  if( offset != 33 ) offsetString = " -q $offset"
+
+  # Run paramters
+  string mod = "# Running Cutadapt on $rg"
+  string exe = opt{"cutadapt_exe"}
+  int runMem = opt{"cutadapt_mem"}.parseInt() * G
+  mod        = getModuleString( modNames, mod )
+
+  tid := task( left <- fq1, cpus := 1, mem := runMem, taskName := "clip.$rg" ) {
+    sys $mod
+    sys $exe -b $adapter1$adapter2$optMinLen$offsetString $fq1 2> $logs | gzip -c > $left
+    sys sleep $safeSleep
+  }
+
+  # Return task
+  return( tid )
+}

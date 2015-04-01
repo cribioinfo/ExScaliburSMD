@@ -1,0 +1,41 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+include "Mutect.bds"
+include "Shimmer.bds"
+include "SomaticSniper.bds"
+include "Strelka.bds"
+include "VarScan2.bds"
+include "Virmid.bds"
+
+/**
+ * Runs the Somatic Mutation Detection module and filtration
+ * @input cfg the sample config file
+ * @input aln the alignment ID
+ * @input smd the SMD ID
+ * @input opt the options map
+ * @returns nothing 
+ */
+void RunSomaticDetection( string{} cfg, string[] callableBeds, string aln, string smd, string{} opt ) {
+
+  # Which SMD tool to run
+  if( smd == "mutect" ) MutectAndFilter( cfg, callableBeds, opt{"reference"}, opt, aln )
+  if( smd == "shimmer" ) ShimmerAndFilter( cfg, callableBeds, opt{"reference"}, opt, aln )
+  if( smd == "sniper" ) SomaticSniperAndFilter( cfg, callableBeds, opt{"reference"}, opt, aln )
+  if( smd == "strelka" ) StrelkaAndFilter( cfg, opt{"reference"}, opt, aln )
+  if( smd == "varscan" ) VarScanAndFilter( cfg, callableBeds, opt{"reference"}, opt, aln )
+  if( smd == "virmid" ) VirmidAndFilter( cfg, opt{"reference"}, opt, aln )
+}

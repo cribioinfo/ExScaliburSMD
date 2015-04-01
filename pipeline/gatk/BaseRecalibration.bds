@@ -1,0 +1,169 @@
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+#-- Modules
+string[] modNames = ["java_modname", "gatk_modname"]
+
+/**
+ * runs BaseRecalibrator and PrintReads 
+ *
+ * @input incfg the sample config map
+ * @input bams the input bam list 
+ * @input opt the option map
+ * @input aln the alignment ID
+ * @returns a list recalibrated bam files [normal, tumor] 
+ */
+string[] runBaseRecalibration( string{} incfg, string[] bams, string{} opt, string aln ) {
+  # General information
+  string reference     = opt{"reference"}
+  string[] knowns      = [opt{"knowndb"}, opt{"known_indel"}]
+  string sample        = incfg{"sample"}
+  string normalID      = "$sample-NORMAL"
+  string tumorID       = "$sample-TUMOR"
+  
+  # Files
+  string referenceName = opt{"reference_name"}
+  string projectDir    = incfg{"projectDir"}.path()
+  string resultsDir    = incfg{"resultsDir"}.path()
+  string logsDir       = incfg{"logsDir"}.path()
+  string runDir        = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln"
+  string tmpDir        = projectDir.path() + "/results/$sample/02_GatkProcessing/$aln/tmp"
+  string runLogsDir    = projectDir.path() + "/logs/02_GatkProcessing/$aln"
+
+  if( !runLogsDir.exists() ) runLogsDir.mkdir()
+  if( !runDir.exists() ) runDir.mkdir()
+  if( !tmpDir.exists() ) tmpDir.mkdir()
+
+  #-- NORMAL 
+  string normalRealign   = bams[0]
+  string normalBam       = runDir + "/$normalID.$aln.recalibrated.bam"
+  string normalTable     = runDir + "/$normalID.$aln.table"
+  string normalRecalLogs = runLogsDir + "/$normalID.$aln.BaseRecalibration.logs"
+  string normalPrintLogs = runLogsDir + "/$normalID.$aln.PrintReads.logs"
+
+  # Check dependency
+  if( normalBam <- normalRealign ) {
+    info("Sample=$sample | Phenotype=NORMAL | Task=Base Recalibration | Aln=$aln | Run=true")
+    # Get targets
+    string recalTask = runRecalibrate( normalRealign, normalRecalLogs, normalTable, knowns, \
+                                       reference, normalID, aln, opt )
+
+    # Get realigned bam
+    string printTask = runPrintReads( normalRealign, normalBam, normalPrintLogs, normalTable, \
+                                      reference, normalID, aln, opt )
+  } else info("Sample=$sample | Phenotype=NORMAL | Task=Base Recalibration | Aln=$aln | Run=false")
+
+  #-- TUMOR 
+  string tumorRealign   = bams[1]
+  string tumorBam       = runDir + "/$tumorID.$aln.recalibrated.bam"
+  string tumorTable     = runDir + "/$tumorID.$aln.table"
+  string tumorRecalLogs = runLogsDir + "/$tumorID.$aln.BaseRecalibration.logs"
+  string tumorPrintLogs = runLogsDir + "/$tumorID.$aln.PrintReads.logs"
+
+  # Check dependency
+  if( tumorBam <- tumorRealign ) { 
+    info("Sample=$sample | Phenotype=TUMOR | Task=Base Recalibration | Aln=$aln | Run=true")
+    # Get quality table 
+    string recalTask = runRecalibrate( tumorRealign, tumorRecalLogs, tumorTable, knowns, \
+                                       reference, tumorID, aln, opt ) 
+
+    # Get recalibrated bam
+    string printTask = runPrintReads( tumorRealign, tumorBam, tumorPrintLogs, tumorTable, \
+                                      reference, tumorID, aln, opt ) 
+  } else info("Sample=$sample | Phenotype=TUMOR | Task=Base Recalibration | Aln=$aln | Run=false")
+
+  return [normalBam, tumorBam]
+}
+
+/**
+ * runs BaseRecalibrator
+ *
+ * @input bam the input bam 
+ * @input logs the log file 
+ * @input table the output table file 
+ * @input knowns the list of known sites VCF files 
+ * @input reference the reference fasta file
+ * @input opt the option map
+ * @returns a task ID
+ */
+string runRecalibrate( string bam, string logs, string table, string[] knowns, \
+                       string reference, string sampID, string aln, string{} opt ) {
+
+  # Options
+  string knownString
+  string targetBed
+  if( !knowns.isEmpty() ) knownString = " --knownSites " + knowns.join(" --knownSites ")
+  if( opt.hasKey("target_bed") ) targetBed = " -L " + opt{"target_bed"}
+
+  # Run settings
+  int threads        = opt{"gatk_threads"}.parseInt()
+  string gatkExe     = opt{"gatk_exe"}
+  string gatkJavaMem = opt{"gatk_mem"}
+  int gatkMem        = (opt{"gatk_mem"}.parseInt() + 1) * G
+  gatkMem            = getMemorySize( gatkMem, threads )
+  string java        = "$baseJava -Xmx" + gatkJavaMem + "G -jar"
+  string mod         = "# BaseRecalibrator on $bam"
+  mod                = getModuleString( modNames, mod )
+
+  # Run
+  string tid
+  if( table <- bam ) {
+    tid = task( table <- bam, cpus := threads, mem := gatkMem, taskName := "recalibrate.$sampID.$aln" ) {
+      sys $mod
+      sys $java $gatkExe -T BaseRecalibrator -I $bam -R $reference$knownString$targetBed \
+      $rods -nct $threads -o $table > $logs 2>&1 
+      sys sleep $safeSleep
+    }
+  }
+
+  return( tid )
+}
+
+/**
+ * runs PrintReads 
+ *
+ * @input inbam the input bam 
+ * @input obam the output recalibrated bam file 
+ * @input logs the log file 
+ * @input table the input base recalibration table file 
+ * @input reference the reference fasta file
+ * @input opt the option map
+ * @returns a task ID
+ */
+string runPrintReads( string inbam, string obam, string logs, string table, string reference, \
+                      string sampID, string aln, string{} opt ) {
+  # Run settings
+  int threads        = opt{"gatk_threads"}.parseInt()
+  string gatkExe     = opt{"gatk_exe"}
+  string gatkJavaMem = opt{"gatk_mem"}
+  int gatkMem        = (opt{"gatk_mem"}.parseInt() + 1) * G
+  gatkMem            = getMemorySize( gatkMem, threads )
+  string java        = "$baseJava -Xmx" + gatkJavaMem + "G -jar"
+  string mod         = "# PrintReads on $inbam"
+  mod                = getModuleString( modNames, mod )
+
+  # Run
+  string tid
+  if( obam <- [inbam, table] ) {
+    tid = task( obam <- [inbam, table], cpus := threads, mem := gatkMem, taskName := "printreads.$sampID.$aln" ) {
+      sys $mod
+      sys $java $gatkExe -T PrintReads -I $inbam -R $reference $rods -nct $threads \
+          -BQSR $table -o $obam > $logs 2>&1
+      sys sleep $safeSleep
+    }
+  }
+  return( tid )
+}
