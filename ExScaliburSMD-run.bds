@@ -1,0 +1,281 @@
+#!/usr/bin/env bds
+/**
+ * Copyright (C) 2013-2015 Center for Research Informatics, The University of Chicago 
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of 
+ * the GNU Lesser General Public License as published by the Free Software Foundation, version 
+ * 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; 
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+ * See the GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License along with this program.
+ * If not, see <http://www.gnu.org/licenses/>. 
+ */
+
+// Global JAVA and SAFE SLEEP vars
+string baseJava = "java -XX:ParallelGCThreads=2"
+int safeSleep   = 10
+
+// Imports
+include "pipeline/utils/BamUtils.bds"
+include "pipeline/preprocessing/PreprocessingModule.bds"
+include "pipeline/alignment/AlignmentModule.bds"
+include "pipeline/gatk/GatkModule.bds"
+include "pipeline/somatic/SomaticDetectionModule.bds"
+include "pipeline/annotate/VariantAnnotationModule.bds"
+
+// Version
+string VERSION = "v1.0.0"
+
+// Print the header to the console
+info("-"*80)
+info("RunExScaliburSMD $VERSION")
+info("Whole-exome somatic mutation detection by the Center for Research Informatics")
+info("Copyright 2014-2015 Center for Research Informatics, University of Chicago")
+info("License: LGPLv3")
+info("Commands: " + args.join())
+info("-"*80)
+
+// Command line args
+string[] in
+string options
+if( in.isEmpty() || options.isEmpty() ) {
+  usage()
+  exit(0)
+}
+
+// Global args
+string{} opt       = config(options)
+string reference   = opt{"reference"}
+
+/**
+ * Pipeline Starts here.
+ * Loops over each sample config file and runs the pipeline in parallel.
+ */
+for( string i : in ) {
+  par runSample(i)
+}
+
+###############################################################################
+# Main pipeline running functions
+###############################################################################
+
+/**
+ * Wrapper for running the pipeline on a given sample from the command-line input
+ * in parallel.
+ * @input i the sample configuration file.
+ * @returns nothing
+ */
+void runSample( string i ) {
+
+  # Current sample config
+  string{} sampleCfg = config(i)
+
+  # General information
+  string sample     = sampleCfg{"sample"}
+  string projectDir = sampleCfg{"projectDir"}.path()
+  string resultsDir = sampleCfg{"resultsDir"}.path()
+  string logsDir    = sampleCfg{"logsDir"}.path()
+  bool isSplit      = sampleCfg{"split"}.parseBool()
+
+  if( !projectDir.exists() ) projectDir.mkdir()
+  if( !resultsDir.exists() ) resultsDir.mkdir()
+  if( !logsDir.exists() ) logsDir.mkdir()
+
+  # Tumor/Normal configs for this sample
+  string[] normalCfgs       = sampleCfg{"normalConfigs"}.split(",")
+  string[] tumorCfgs        = sampleCfg{"tumorConfigs"}.split(",")
+  string[] sampleConfigList = getSampleConfigList(normalCfgs, tumorCfgs)
+
+  info("Sample=$sample | Phenotype=NORMAL | Total Readgroups=" + normalCfgs.size())
+  info("Sample=$sample | Phenotype=TUMOR | Total Readgroups=" + tumorCfgs.size())
+
+  #------------ What to run?? -----------------# 
+  string[] alnList, smdList
+  bool doFastqc        = sampleCfg{"runFastqc"}.parseBool()
+  bool doClipping      = sampleCfg{"runClipping"}.parseBool()
+  bool doBwaAln        = sampleCfg{"runBwaAln"}.parseBool()
+  bool doBwaMem        = sampleCfg{"runBwaMem"}.parseBool()
+  bool doNovoalign     = sampleCfg{"runNovoalign"}.parseBool()
+  bool doMutect        = sampleCfg{"runMutect"}.parseBool()
+  bool doShimmer       = sampleCfg{"runShimmer"}.parseBool()
+  bool doSomaticSniper = sampleCfg{"runSomaticSniper"}.parseBool()
+  bool doStrelka       = sampleCfg{"runStrelka"}.parseBool()
+  bool doVarScan       = sampleCfg{"runVarScan"}.parseBool()
+  bool doVirmid        = sampleCfg{"runVirmid"}.parseBool()
+
+  if( doBwaAln ) alnList.add("bwa_aln")
+  if( doBwaMem ) alnList.add("bwa_mem")
+  if( doNovoalign ) alnList.add("novoalign")
+  if( doMutect ) smdList.add("mutect")
+  if( doShimmer ) smdList.add("shimmer")
+  if( doSomaticSniper ) smdList.add("sniper")
+  if( doStrelka ) smdList.add("strelka")
+  if( doVarScan ) smdList.add("varscan")
+  if( doVirmid ) smdList.add("virmid")
+
+  #-- Preprocessing
+  string[] prePids = RunPreprocessing( sampleConfigList, sample, projectDir, \
+                    resultsDir, logsDir, doFastqc, doClipping, \
+                    opt )
+  #-- SAFE GUARD
+  wait prePids
+
+  # Loop over each aligner in parallel
+  string[] runpids
+  for( string aln : alnList ) {
+    runpid := par ParallelRun( sampleCfg, aln, smdList, opt, isSplit ) 
+    runpids.add(runpid)
+  }
+
+  #-- SAFE GUARD
+  wait runpids
+
+  ## List of final annotated files
+  string[] finalMultiAnno = getFinalMultiAnno( resultsDir, sample, alnList, smdList )
+
+  ##-- Pipeline reporter
+  info("Sample=$sample | Task=Build Report")
+  string mod            = '# Running reporter builder for $sample'
+  string pythonExe      = opt{'python_exe'}
+  string reporterExe    = opt{'build_reporter_exe'}
+  string reporterCfg    = sampleCfg{'reporterConfig'}
+  string[] reporterDeps = sampleCfg{'reporterOutputs'}.split(",")
+  string reporterLogDir = logsDir + '/05_ProjectReporter'
+  if( !reporterLogDir.exists() ) reporterLogDir.mkdir()
+  string reporterLogs   = '$reporterLogDir/$sample.reporter.logs'
+  task( reporterDeps <- finalMultiAnno, cpus := 1 ) {
+    sys $mod
+    sys $pythonExe $reporterExe $reporterCfg > $reporterLogs 2>&1 
+  }
+}
+
+/**
+ * Runs the pipeline for a given aligner track in parallel. The basic flow is:
+ * Alignment -> Postprocessing -> Scatter -> Somatic Detection -> Gather -> Annotation
+ *
+ * @input sampleCfg the sample configuration map
+ * @input aln the alignment id
+ * @input smdList the list of requested smd ids
+ * @input opt the option map #TODO: Perhaps this isn't needed since it's global?
+ * @input isSplit whether this is a scatter-gather run
+ * @return nothing
+ */
+void ParallelRun( string{} sampleCfg, string aln, string[] smdList, string{} opt, bool isSplit ) {
+  # -- Align 
+  RunAlignments( sampleCfg, reference, aln, opt )
+
+  # -- GATK Processing
+  string[] callableBeds = RunGatkProcessing( sampleCfg, aln, opt, isSplit )
+
+  for( string smd : smdList ) {
+    #-- Somatic Mutation Detection
+    RunSomaticDetection( sampleCfg, callableBeds, aln, smd, opt ) 
+
+    #-- Variant Annotation
+    RunVariantAnnotation( sampleCfg, resultsDir, aln, smd, opt )
+  }
+}
+
+#-----------------------------------------------------------------------------#
+# Global Utility Functions
+#-----------------------------------------------------------------------------#
+
+/**
+ * Returns the memory value that should be passed on the the task.
+ * Since SGE multiplies memory requests by the number of threads,
+ * we need to divide the values from the configuration file by nthreads.
+ *
+ * @input totalMem the total requested memory for the task from the config file
+ * @input nThreads the request threads for the task
+ * @return the appropriate memory size
+ */
+int getMemorySize( int totalMem, int nThreads ) {
+    int retMem = totalMem
+    if( system == "sge" ) {
+        retMem = totalMem / nThreads
+    }
+    return( retMem )
+}
+
+/**
+ * Returns the mod string for use in sys
+ *
+ * @input moduleList the list of modules to load
+ * @input defaultMod what to return if no modules are requested
+ * @return a formatted string for loading modules, or just a comment if no mods requested
+ */
+string getModuleString( string[] moduleList, string defaultMod ) {
+  string mod
+  string[] modList
+  for( string m : moduleList ) {
+    if( opt.hasKey(m) ) modList.add("module load " + opt{m})
+  }
+  if( !modList.isEmpty() ) {
+    if( opt.hasKey("module_source") ) mod = ". " + opt{"module_source"} + "; " + modList.join("; ")
+    else mod = modList.join("; ")
+  } else {
+    mod = defaultMod
+  }
+
+  return( mod )
+}
+
+/**
+ * Gets the list of ALL config files for the current sample to be used for deps
+ *
+ * @input normalCfgs the list of normal configuration files
+ * @input tumorCfgs the list of tumor configuration files
+ * @return a list of all tumor and normal config files for this sample
+ */
+string[] getSampleConfigList(string[] normalCfgs, string[] tumorCfgs) {
+  string[] retList
+  for( string n : normalCfgs ) retList.add(n)
+  for( string t : tumorCfgs ) retList.add(t)
+  return retList
+}
+
+/**
+ * Gets the full path to the final annotated annovar files to used for deps
+ *
+ * @input resultsDir the results directory for this sample
+ * @input sample the sample id
+ * @input alnList the list of requested alignment ids
+ * @input smdList the list of requested somatic ids
+ * @return a list of annotated annovar files
+ */
+string[] getFinalMultiAnno( string resultsDir, string sample, string[] alnList, \
+                            string[] smdList ) {
+  string refname = opt{"reference_name"}
+  string outDir  = resultsDir.path() + "/04_VariantAnnotation"
+  string[] fList
+  for( string aln : alnList ) {
+    for( string smd : smdList ) {
+      string finalFile = "$outDir/$sample.$smd.$aln.vcf.annovar.anno.$refname" + "_multianno.txt" 
+      fList.add(finalFile)
+    }
+  }
+  return( fList )
+}
+
+/**
+ * Prints info to stdout
+ * 
+ * @input msg the message to print
+ * @return nothing
+ */
+void info(string msg) {
+    println "[INFO][ExScaliburSMD] - $msg"
+}
+
+/**
+ * Prints usage to stdout
+ *
+ * @return nothing
+ */
+void usage() {
+  println("RunExScaliburSMD.bds -in <sample1.cfg> <sample2.cfg> ... <sampleN.cfg> ")
+  println("                     -options <softwareOptions.cfg>")
+}
