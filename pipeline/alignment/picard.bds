@@ -58,6 +58,9 @@ string mergeBams( string[] rawBams, string outputMergedBam, string logs, \
  * Marks PCR Duplicates 
  * @input inBam the bam file to mark duplicates 
  * @input obam the output bam file with duplicates marked 
+ * @input logs the output log file
+ * @input sampID the sample ID
+ * @input aln the alignment ID
  * @input opt the option map
  * @returns a task ID
  */
@@ -89,8 +92,10 @@ string dedupBam( string inBam, string obam, string logs, string sampID, string a
  * @input inBam the bam file to analyze 
  * @input pfx the metrics files prefix 
  * @input coverageFile the output coverage file 
+ * @input logs the output log file
+ * @input sampID the sample ID
+ * @input aln the alignment ID
  * @input opt the option map
- * @input tid the task to wait on 
  * @returns nothing 
  */
 void collectMetrics( string inBam, string pfx, string coverageFile, string logs, \

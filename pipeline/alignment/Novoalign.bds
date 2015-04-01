@@ -465,4 +465,4 @@ string{} novoSingle( string fq1, string rgid, string rgString, string sample, st
   # Return map
   string{} rmap = {"bams" => bams.join(","), "tmps" => tmps.join(","), "tid" => tid}
   return rmap
-} 
+}
