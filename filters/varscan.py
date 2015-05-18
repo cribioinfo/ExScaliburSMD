@@ -59,7 +59,7 @@ def load_snv(args, dic):
                 if ncov < args.min_normal_depth: filter_list.append("LowDPN")
                 if tcov < args.min_tumor_depth: filter_list.append("LowDPT")
                 if ss == "GERM" and gpv >= args.pval_cutoff: filter_list.append("GPV")
-                if ss == "SOM":
+                if ss == "SOMATIC":
                     if spv >= args.pval_cutoff: filter_list.append("SPV")
                     if nfreq >= args.max_alt_freq_normal: filter_list.append("NAF")
                     if tfreq < args.min_alt_freq_tumor: filter_list.append("TAF")
