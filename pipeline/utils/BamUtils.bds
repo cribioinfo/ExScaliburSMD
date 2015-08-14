@@ -106,28 +106,3 @@ void getIntervalBam( string inbam, string outbam, string bedFile, string logs, s
     sys sleep $safeSleep
   }
 }
-
-#string[] runSplitRegions( string bed, string aln, string{} cfg, string{} opt ) {
-#  # General Info
-#  string sample = cfg{"sample"}
-#  string resultsDir = cfg{"resultsDir"}.path()
-#  string logsDir = cfg{"logsDir"}.path() + "/02_GatkProcessing/$aln/split"
-#  string runDir  = resultsDir.path() + "/02_GatkProcessing/$aln/split"
-#  if( !logsDir.exists() ) logsDir.mkdir()
-#  if( !runDir.exists() ) runDir.mkdir()
-#
-#  # Files
-#  string runLogs = "$logsDir/$sample.$aln.split.logs"
-#  string resCfg  = "$runDir/$sample.$aln.split.cfg" 
-#
-#  # Run info
-#  string splitExe = cfg{"split_script_exe"}
-#  string maxSplits = cfg{"max_splits"}.parseInt() 
-#
-#  # Run
-#  task( resCfg <- bed, cpus := 1 ) {
-#    sys $splitExe $bed $refCfg $maxSplits
-#  }
-#  
-#
-#}
