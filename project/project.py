@@ -131,6 +131,7 @@ class Project(object):
         [check_dir(i) for i in self.files.values()]
 
     def __write_bds_config(self):
+        '''Write the default BDS config file for an amazon cloud run'''
         self.bds_file = os.path.join(os.path.abspath(self.args.output_directory), 'bds.config')
         with open(self.bds_file, 'wb') as o:
             o.write('# BDS configuration file\n')
@@ -172,6 +173,7 @@ class Project(object):
             o.write('sge.timeout = h_rt\n\n')
 
     def __write_project_run_script(self):
+        '''The script for running ExScalibur'''
         bds_script  = os.path.join(self.PATH, 'ExScaliburSMD-run.bds')
         main_job    = os.path.join(self.files['project_path'], '{0.name}.exscalibur-smd.sh'.format(self))
         bds_log     = os.path.join(self.files['project_path'], 'BDS-System.logs')

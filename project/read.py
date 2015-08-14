@@ -5,14 +5,6 @@ import logging
 import os
 import re
 
-#from .preprocessing.fastqc import FastQC
-#from .preprocessing.seqprep import SeqPrep
-#from .preprocessing.cutadapt import Cutadapt 
-#
-#from .alignment.bwa import BwaAln
-#from .alignment.bwa import BwaMem
-#from .alignment.novoalign import Novoalign
-
 class IlluminaSeq(object):
     '''Class representing metadata for a SE or PE Illumina Fastq file(s).
       
