@@ -5,7 +5,7 @@
 
 __author__='Kyle Hernandez'
 __email__='khernandez@bsd.uchicago.edu'
-__version__='0.5.0'
+__version__='0.5.1'
 __license__='LGPLv3'
 __url__='https://bitbucket.org/cribioinformatics/exscalibursmd'
 
