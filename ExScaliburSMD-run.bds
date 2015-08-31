@@ -27,7 +27,7 @@ include "pipeline/somatic/SomaticDetectionModule.bds"
 include "pipeline/annotate/VariantAnnotationModule.bds"
 
 // Version
-string VERSION = "v0.5.0"
+string VERSION = "0.5.1"
 
 // Print the header to the console
 info("-"*80)

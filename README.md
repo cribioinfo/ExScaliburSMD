@@ -23,7 +23,7 @@ The SMD pipeline is part of the ExScalibur suite (CRI, University of Chicago): h
 
 # Documentation #
 
-Please see the [Wiki](https://bitbucket.org/cribioinformatics/exscalibursmd/wiki) for full documentation.
+Please see the [Wiki](https://github.com/cribioinfo/ExScaliburSMD/wiki/01.-Overview) for full documentation.
 
 # Communication #
 
@@ -33,6 +33,7 @@ For other general questions, please contact the CRI bioinformatics team (bioinfo
 # Release #
 
 * **Version 0.5.0** *2015-03-31*
+* **Version 0.5.1** *2015-08-31* - migrating the wiki from bitbucket to github
 
 # Development #
 
